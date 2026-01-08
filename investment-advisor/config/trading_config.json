@@ -1,0 +1,79 @@
+{
+  "capital": 500,
+  "leverage": 5,
+  "platform": "eToro",
+  "currency": "EUR",
+
+  "risk_parameters": {
+    "max_stop_loss_pct": 5.0,
+    "min_risk_reward": 3.0,
+    "position_size_normal_pct": 5.0,
+    "position_size_exceptional_pct": 10.0,
+    "max_concurrent_positions": 2,
+    "min_holding_days": 3,
+    "max_holding_days": 10
+  },
+
+  "filters": {
+    "min_market_cap_usd": 300000000,
+    "max_market_cap_usd": 50000000000,
+    "min_beta": 1.5,
+    "preferred_beta": 1.8,
+    "min_price_usd": 5.0,
+    "max_price_usd": 200.0,
+    "max_spread_pct": 0.5,
+    "volume_thresholds": {
+      "small_cap_300M_1B": 2000000,
+      "mid_cap_1B_5B": 1500000,
+      "large_cap_above_5B": 1000000
+    }
+  },
+
+  "scoring": {
+    "min_score_for_buy": 75,
+    "min_score_for_watchlist": 60,
+    "dimensions": {
+      "timing": {"weight": 1, "max": 5},
+      "technical": {"weight": 1, "max": 5},
+      "risk_reward": {"weight": 1, "max": 5},
+      "fundamental": {"weight": 1, "max": 5},
+      "catalyst": {"weight": 1, "max": 5}
+    }
+  },
+
+  "etoro_costs": {
+    "overnight_fee_annual_pct": 9.0,
+    "spread_per_side_pct": 0.15,
+    "weekend_multiplier": 3,
+    "notes": "Hold 7 dias con x5 = ~0.5% coste. Fines de semana cobran 3x."
+  },
+
+  "schedule": {
+    "timezone": "Europe/Madrid",
+    "scans": [
+      {"time": "09:00", "market": "EU", "description": "Apertura mercado europeo"},
+      {"time": "14:00", "market": "US", "description": "Pre-market US"},
+      {"time": "15:30", "market": "US", "description": "Apertura mercado US"}
+    ]
+  },
+
+  "watchlist": {
+    "us_tech": ["NVDA", "AMD", "TSLA", "META", "GOOGL", "AMZN", "MSFT", "AAPL"],
+    "us_semiconductors": ["AVGO", "MRVL", "MU", "QCOM", "ARM", "SMCI"],
+    "us_software": ["CRM", "NOW", "SNOW", "PLTR", "DDOG", "NET"],
+    "us_consumer": ["SHOP", "COIN", "SQ", "PYPL", "ABNB"],
+    "us_biotech": ["MRNA", "REGN", "VRTX", "BIIB"],
+    "us_energy": ["XOM", "CVX", "OXY", "SLB"],
+    "us_financials": ["JPM", "GS", "MS", "BAC"],
+    "eu_main": ["ASML", "SAP", "LVMH", "NVO", "SHEL", "TTE", "SAN", "BNP"]
+  },
+
+  "exclusions": [
+    "Penny stocks (<$5)",
+    "Mega caps (>$50B) salvo catalizador excepcional",
+    "REITs, utilities, preferreds",
+    "Acciones en blackout pre-earnings sin otro catalizador",
+    "Biotechs en fase pre-revenue",
+    "Small caps (<$1B) con spread >0.5% o volumen <2M"
+  ]
+}

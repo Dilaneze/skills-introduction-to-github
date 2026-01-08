@@ -1,0 +1,184 @@
+name: Investment Advisor - Market Scanner
+
+on:
+  # Ejecucion programada (cron)
+  schedule:
+    # 14:00 hora Espana (13:00 UTC) - Pre-market US
+    - cron: '0 13 * * 1-5'
+    # 9:00 hora Espana (8:00 UTC) - Apertura EU
+    - cron: '0 8 * * 1-5'
+    # 15:30 hora Espana (14:30 UTC) - Apertura US
+    - cron: '30 14 * * 1-5'
+
+  # Permitir ejecucion manual
+  workflow_dispatch:
+    inputs:
+      custom_watchlist:
+        description: 'Watchlist personalizada (separada por comas, ej: NVDA,AMD,TSLA)'
+        required: false
+        default: ''
+      force_notification:
+        description: 'Forzar notificacion aunque no haya oportunidades'
+        type: boolean
+        default: false
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  scan-market:
+    name: Escanear Mercado
+    runs-on: ubuntu-latest
+
+    # Solo ejecutar de lunes a viernes (mercados abiertos)
+    # El cron ya filtra esto, pero por seguridad
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule')
+
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Ejecutar analisis de mercado
+        id: scan
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          ALPHA_VANTAGE_KEY: ${{ secrets.ALPHA_VANTAGE_KEY }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          CUSTOM_WATCHLIST: ${{ github.event.inputs.custom_watchlist }}
+        run: |
+          cd investment-advisor/src
+          python market_analyzer.py
+
+          # Leer resultado
+          if [ -f scan_output.json ]; then
+            HAS_OPPS=$(python -c "import json; d=json.load(open('scan_output.json')); print('true' if d.get('has_opportunities') else 'false')")
+            echo "has_opportunities=$HAS_OPPS" >> $GITHUB_OUTPUT
+
+            # Extraer titulo y body para el issue
+            TITLE=$(python -c "import json; d=json.load(open('scan_output.json')); print(d.get('issue_title', 'Market Scan'))")
+            echo "issue_title=$TITLE" >> $GITHUB_OUTPUT
+          else
+            echo "has_opportunities=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Subir reporte como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-scan-${{ github.run_number }}
+          path: investment-advisor/src/scan_output.json
+          retention-days: 30
+
+      - name: Crear Issue de alerta
+        if: steps.scan.outputs.has_opportunities == 'true' || github.event.inputs.force_notification == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd investment-advisor/src
+
+          # Leer contenido del issue desde el JSON
+          TITLE=$(python -c "import json; d=json.load(open('scan_output.json')); print(d.get('issue_title', 'Market Scan Alert'))")
+          BODY=$(python -c "import json; d=json.load(open('scan_output.json')); print(d.get('issue_body', 'No content'))")
+
+          # Crear issue (esto generara notificacion push)
+          gh issue create \
+            --title "$TITLE" \
+            --body "$BODY" \
+            --label "investment-alert,automated"
+
+      - name: Resumen del scan
+        run: |
+          echo "## Resumen del Scan de Mercado" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Fecha**: $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Oportunidades encontradas**: ${{ steps.scan.outputs.has_opportunities }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f investment-advisor/src/scan_output.json ]; then
+            echo "### Detalle" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat investment-advisor/src/scan_output.json | head -100 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # Job adicional para notificacion via otras plataformas (opcional)
+  notify-telegram:
+    name: Notificar Telegram (Opcional)
+    needs: scan-market
+    runs-on: ubuntu-latest
+    if: needs.scan-market.outputs.has_opportunities == 'true' && vars.TELEGRAM_ENABLED == 'true'
+
+    steps:
+      - name: Descargar reporte
+        uses: actions/download-artifact@v4
+        with:
+          name: market-scan-${{ github.run_number }}
+
+      - name: Enviar a Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          MESSAGE=$(python3 -c "
+          import json
+          d = json.load(open('scan_output.json'))
+          opps = d.get('scan_result', {}).get('opportunities', [])
+          if opps:
+              msg = '🚀 *ALERTA DE INVERSION*\n\n'
+              for o in opps[:3]:
+                  msg += f\"*{o['symbol']}* - Score: {o['total_score']:.0f}/100\n\"
+                  msg += f\"Precio: \${o.get('price', 'N/A')}\n\"
+                  setup = o.get('trade_setup', {})
+                  if setup:
+                      msg += f\"Entry: \${setup.get('entry')}\n\"
+                      msg += f\"Stop: \${setup.get('stop_loss')} (-{setup.get('stop_pct')}%)\n\"
+                      msg += f\"Target: \${setup.get('take_profit')} (+{setup.get('target_pct')}%)\n\"
+                  msg += '\n'
+              print(msg)
+          else:
+              print('Sin oportunidades claras hoy')
+          ")
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="${MESSAGE}" \
+            -d parse_mode="Markdown"
+
+  # Notificacion por email (opcional)
+  notify-email:
+    name: Notificar Email (Opcional)
+    needs: scan-market
+    runs-on: ubuntu-latest
+    if: needs.scan-market.outputs.has_opportunities == 'true' && vars.EMAIL_ENABLED == 'true'
+
+    steps:
+      - name: Descargar reporte
+        uses: actions/download-artifact@v4
+        with:
+          name: market-scan-${{ github.run_number }}
+
+      - name: Enviar email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "🚀 Alerta de Inversion - Oportunidad Detectada"
+          to: ${{ secrets.NOTIFICATION_EMAIL }}
+          from: Investment Advisor Bot
+          body: |
+            Se ha detectado una oportunidad de inversion.
+
+            Revisa el reporte completo en GitHub:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
