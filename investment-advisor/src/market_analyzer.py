@@ -169,7 +169,17 @@ class MarketDataAPI:
         if not quote:
             return None
 
-        # Obtener datos adicionales
+        # Intentar obtener datos adicionales de Yahoo
+        yahoo_data_ok = self._fetch_yahoo_details(quote, symbol)
+
+        # Si Yahoo fallo y tenemos Finnhub, usar como fallback
+        if not yahoo_data_ok and self.finnhub_key:
+            self._fetch_finnhub_details(quote, symbol)
+
+        return quote
+
+    def _fetch_yahoo_details(self, quote: dict, symbol: str) -> bool:
+        """Obtiene datos adicionales de Yahoo Finance. Retorna True si tuvo exito."""
         try:
             url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
             params = {"modules": "summaryDetail,defaultKeyStatistics,financialData"}
@@ -190,7 +200,6 @@ class MarketDataAPI:
                     stats = result.get("defaultKeyStatistics", {})
                     financials = result.get("financialData", {})
 
-                    # Helper para extraer valores de forma segura
                     def safe_get(d, key):
                         val = d.get(key, {})
                         if isinstance(val, dict):
@@ -211,11 +220,56 @@ class MarketDataAPI:
                         "profit_margin": safe_get(financials, "profitMargins"),
                     })
 
-        except Exception as e:
-            print(f"[WARN] Error datos adicionales {symbol}: {e}")
-            # Continuar con datos basicos si falla
+                    # Verificar si obtuvimos datos utiles
+                    if quote.get("market_cap") or quote.get("52w_high"):
+                        return True
 
-        return quote
+        except Exception as e:
+            print(f"[WARN] Yahoo details failed for {symbol}: {e}")
+
+        return False
+
+    def _fetch_finnhub_details(self, quote: dict, symbol: str) -> bool:
+        """Obtiene datos de Finnhub como fallback. Retorna True si tuvo exito."""
+        if not self.finnhub_key:
+            return False
+
+        try:
+            # Obtener perfil de la empresa (market cap)
+            url = f"https://finnhub.io/api/v1/stock/profile2"
+            params = {"symbol": symbol, "token": self.finnhub_key}
+            response = requests.get(url, params=params, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data:
+                    quote["market_cap"] = data.get("marketCapitalization", 0) * 1e6  # Finnhub da en millones
+                    quote["beta"] = data.get("beta")
+
+            # Obtener metricas basicas
+            url = f"https://finnhub.io/api/v1/stock/metric"
+            params = {"symbol": symbol, "metric": "all", "token": self.finnhub_key}
+            response = requests.get(url, params=params, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                metrics = data.get("metric", {})
+                if metrics:
+                    quote["52w_high"] = metrics.get("52WeekHigh")
+                    quote["52w_low"] = metrics.get("52WeekLow")
+                    quote["beta"] = quote.get("beta") or metrics.get("beta")
+                    quote["pe_ratio"] = metrics.get("peBasicExclExtraTTM")
+                    quote["revenue_growth"] = metrics.get("revenueGrowthTTMYoy")
+                    quote["profit_margin"] = metrics.get("netProfitMarginTTM")
+                    if quote.get("revenue_growth"):
+                        quote["revenue_growth"] = quote["revenue_growth"] / 100  # Convertir a decimal
+
+            return quote.get("market_cap") is not None
+
+        except Exception as e:
+            print(f"[WARN] Finnhub details failed for {symbol}: {e}")
+
+        return False
 
     def get_earnings_calendar(self, days_ahead: int = 7) -> list:
         """Obtiene calendario de earnings proximos"""
