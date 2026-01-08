@@ -93,8 +93,7 @@ jobs:
           # Crear issue (esto generara notificacion push)
           gh issue create \
             --title "$TITLE" \
-            --body "$BODY" \
-            --label "investment-alert,automated"
+            --body "$BODY"
 
       - name: Resumen del scan
         run: |
