@@ -276,28 +276,28 @@ class OpportunityScorer:
             "volume": stock_data.get("avg_volume"),
             "scores": scores,
             "total_score": round(final_score, 1),
-            "signal": "COMPRA" if final_score >= 75 and not exclusion_reason else "WATCHLIST" if final_score >= 60 else "SKIP",
+            "signal": "COMPRA" if final_score >= 72 and not exclusion_reason else "WATCHLIST" if final_score >= 56 else "SKIP",
             "exclusion_reason": exclusion_reason,
-            "trade_setup": self._calculate_trade_setup(stock_data) if final_score >= 75 else None
+            "trade_setup": self._calculate_trade_setup(stock_data) if final_score >= 72 else None
         }
 
     def _score_timing(self, catalyst_info: dict) -> int:
         """Puntua el timing del catalizador (1-5)"""
         if not catalyst_info:
-            return 2
+            return 3  # Neutral sin catalizador (antes era 2)
 
         days_to_catalyst = catalyst_info.get("days_ahead", 30)
 
         if days_to_catalyst <= 3:
             return 5
         elif days_to_catalyst <= 7:
-            return 4
+            return 5
         elif days_to_catalyst <= 14:
-            return 3
+            return 4
         elif days_to_catalyst <= 21:
-            return 2
+            return 3
         else:
-            return 1
+            return 3
 
     def _score_technical(self, stock_data: dict) -> int:
         """Puntua el setup tecnico (1-5)"""
@@ -306,6 +306,7 @@ class OpportunityScorer:
         price = stock_data.get("price", 0)
         high_52w = stock_data.get("52w_high", 0)
         low_52w = stock_data.get("52w_low", 0)
+        change_pct = stock_data.get("change_pct", 0)
 
         if high_52w and low_52w and price:
             # Posicion en rango 52 semanas
@@ -313,16 +314,27 @@ class OpportunityScorer:
             if range_52w > 0:
                 position = (price - low_52w) / range_52w
 
-                if position > 0.8:  # Cerca de maximos
+                if position > 0.85:  # Muy cerca de maximos - breakout potential
+                    score = 5
+                elif position > 0.7:  # Zona alta con momentum
+                    score = 5
+                elif position > 0.5:  # Zona media-alta
                     score = 4
-                elif position > 0.6:  # Zona alta
-                    score = 5  # Momentum alcista
-                elif position < 0.3:  # Cerca de minimos
-                    score = 2
-                else:
+                elif position > 0.3:  # Zona media
                     score = 3
+                else:  # Cerca de minimos
+                    score = 2
 
-        # Ajustar por volumen
+        # Bonus por momentum del dia (cambio positivo)
+        if change_pct:
+            if change_pct > 3:
+                score = min(5, score + 1)
+            elif change_pct > 1:
+                score = min(5, score + 0)  # Mantener
+            elif change_pct < -3:
+                score = max(1, score - 1)
+
+        # Ajustar por volumen inusual
         volume = stock_data.get("volume", 0)
         avg_volume = stock_data.get("avg_volume", 1)
         if avg_volume and volume > avg_volume * 1.5:
@@ -386,7 +398,7 @@ class OpportunityScorer:
     def _score_catalyst(self, catalyst_info: dict) -> int:
         """Puntua la calidad/probabilidad del catalizador (1-5)"""
         if not catalyst_info:
-            return 2
+            return 3  # Neutral sin catalizador (antes era 2)
 
         catalyst_type = catalyst_info.get("type", "")
 
@@ -398,7 +410,7 @@ class OpportunityScorer:
         if any(c in catalyst_type.lower() for c in high_prob):
             return 5
         elif any(c in catalyst_type.lower() for c in medium_prob):
-            return 3
+            return 4  # Earnings subio de 3 a 4
         elif any(c in catalyst_type.lower() for c in low_prob):
             return 2
 
@@ -518,6 +530,32 @@ class MarketScanner:
     def __init__(self):
         self.api = MarketDataAPI()
         self.scorer = OpportunityScorer(self.api)
+        self.earnings_calendar = {}  # Cache de earnings
+
+    def _load_earnings_calendar(self):
+        """Carga el calendario de earnings para los proximos 14 dias"""
+        print("  Cargando calendario de earnings...")
+        earnings_list = self.api.get_earnings_calendar(days_ahead=14)
+
+        for earning in earnings_list:
+            symbol = earning.get("symbol", "")
+            if symbol:
+                date_str = earning.get("date", "")
+                if date_str:
+                    try:
+                        earning_date = datetime.strptime(date_str, "%Y-%m-%d")
+                        days_ahead = (earning_date - datetime.now()).days
+                        self.earnings_calendar[symbol] = {
+                            "date": date_str,
+                            "days_ahead": max(0, days_ahead),
+                            "type": "earnings",
+                            "eps_estimate": earning.get("epsEstimate"),
+                            "revenue_estimate": earning.get("revenueEstimate")
+                        }
+                    except:
+                        pass
+
+        print(f"  Earnings encontrados: {len(self.earnings_calendar)} acciones con earnings proximos")
 
     def scan_market(self, watchlist: list = None) -> dict:
         """Escanea el mercado en busca de oportunidades"""
@@ -535,7 +573,10 @@ class MarketScanner:
         print(f"S&P 500: {market_status.get('sp500_change', 'N/A')}%")
         print(f"Nasdaq: {market_status.get('nasdaq_change', 'N/A')}%")
 
-        # 2. Escanear watchlist
+        # 2. Cargar calendario de earnings (catalizadores)
+        self._load_earnings_calendar()
+
+        # 3. Escanear watchlist
         opportunities = []
         watchlist_items = []
         skipped = []
@@ -543,7 +584,12 @@ class MarketScanner:
         for symbol in watchlist:
             print(f"  Analizando {symbol}...", end=" ")
 
-            result = self.scorer.score_opportunity(symbol)
+            # Obtener info de catalizador si existe
+            catalyst_info = self.earnings_calendar.get(symbol)
+            if catalyst_info:
+                print(f"[EARNINGS en {catalyst_info['days_ahead']}d] ", end="")
+
+            result = self.scorer.score_opportunity(symbol, catalyst_info)
 
             if result.get("error"):
                 print(f"ERROR: {result['error']}")
@@ -572,7 +618,8 @@ class MarketScanner:
             "watchlist": watchlist_items[:10],   # Top 10 watchlist
             "total_scanned": len(watchlist),
             "opportunities_found": len(opportunities),
-            "watchlist_count": len(watchlist_items)
+            "watchlist_count": len(watchlist_items),
+            "earnings_detected": len(self.earnings_calendar)
         }
 
     def format_report(self, scan_result: dict) -> str:
