@@ -17,34 +17,35 @@ import sys
 
 @dataclass
 class TradingConfig:
-    """Parametros de trading configurables"""
+    """Parametros de trading configurables - MODO AGRESIVO"""
     capital: float = 500.0
     leverage: int = 5
-    max_stop_loss_pct: float = 5.0  # 5% = 25% real con x5
-    min_risk_reward: float = 3.0
+    max_stop_loss_pct: float = 8.0  # 8% = 40% real con x5 (mas agresivo)
+    min_risk_reward: float = 2.5  # Bajado de 3.0 para mas oportunidades
     position_size_normal: float = 5.0  # % del capital
-    position_size_exceptional: float = 10.0
-    max_concurrent_positions: int = 2
-    min_holding_days: int = 3
-    max_holding_days: int = 10
+    position_size_exceptional: float = 15.0  # Subido para plays de alta conviccion
+    max_concurrent_positions: int = 3  # Mas posiciones simultaneas
+    min_holding_days: int = 1  # Permitir day trades
+    max_holding_days: int = 14  # Extendido para swing trades largos
 
-    # Filtros de seleccion
-    min_market_cap: float = 300_000_000  # $300M
-    max_market_cap: float = 50_000_000_000  # $50B
-    min_beta: float = 1.5
-    preferred_beta: float = 1.8
-    min_price: float = 5.0
-    max_price: float = 200.0
-    max_spread_pct: float = 0.5
+    # Filtros de seleccion - MAS PERMISIVOS PARA SMALL CAPS
+    min_market_cap: float = 50_000_000  # $50M (antes $300M) - permite micro caps
+    max_market_cap: float = 100_000_000_000  # $100B (antes $50B) - permite mega caps con momentum
+    min_beta: float = 1.0  # Bajado de 1.5
+    preferred_beta: float = 2.0  # Subido - queremos volatilidad
+    min_price: float = 1.0  # Bajado de $5 - permite penny stocks de calidad
+    max_price: float = 500.0  # Subido de $200
+    max_spread_pct: float = 1.0  # Mas permisivo con spread
 
-    # Volumen minimo por market cap
+    # Volumen minimo por market cap - REDUCIDO
     volume_thresholds: dict = None
 
     def __post_init__(self):
         self.volume_thresholds = {
-            "small": 2_000_000,   # $300M-$1B: 2M shares
-            "mid": 1_500_000,     # $1B-$5B: 1.5M shares
-            "large": 1_000_000    # >$5B: 1M shares
+            "micro": 500_000,    # <$100M: 500K shares
+            "small": 750_000,    # $100M-$1B: 750K shares (antes 2M)
+            "mid": 500_000,      # $1B-$10B: 500K shares (antes 1.5M)
+            "large": 300_000     # >$10B: 300K shares (antes 1M)
         }
 
 config = TradingConfig()
@@ -474,15 +475,18 @@ class OpportunityScorer:
         if beta and beta < config.min_beta:
             return f"Beta muy bajo ({beta:.2f} < {config.min_beta})"
 
-        # Verificar volumen segun market cap
+        # Verificar volumen segun market cap (thresholds reducidos para modo agresivo)
         if market_cap and avg_volume:
-            if market_cap < 1e9:  # Small cap
+            if market_cap < 100e6:  # Micro cap <$100M
+                if avg_volume < config.volume_thresholds["micro"]:
+                    return f"Volumen insuficiente para micro cap ({avg_volume/1e6:.1f}M < {config.volume_thresholds['micro']/1e6:.1f}M)"
+            elif market_cap < 1e9:  # Small cap $100M-$1B
                 if avg_volume < config.volume_thresholds["small"]:
                     return f"Volumen insuficiente para small cap"
-            elif market_cap < 5e9:  # Mid cap
+            elif market_cap < 10e9:  # Mid cap $1B-$10B
                 if avg_volume < config.volume_thresholds["mid"]:
                     return f"Volumen insuficiente para mid cap"
-            else:  # Large cap
+            else:  # Large cap >$10B
                 if avg_volume < config.volume_thresholds["large"]:
                     return f"Volumen insuficiente para large cap"
 
@@ -538,30 +542,86 @@ class OpportunityScorer:
 class MarketScanner:
     """Escaner de oportunidades en el mercado"""
 
-    # Watchlist por defecto de acciones de interes
-    DEFAULT_WATCHLIST_US = [
-        # Tech high-beta
-        "NVDA", "AMD", "TSLA", "META", "GOOGL", "AMZN", "MSFT", "AAPL",
-        # Semiconductores
-        "AVGO", "MRVL", "MU", "QCOM", "ARM", "SMCI",
-        # Software/Cloud
-        "CRM", "NOW", "SNOW", "PLTR", "DDOG", "NET",
-        # Consumer
-        "SHOP", "COIN", "SQ", "PYPL", "ABNB",
-        # Biotech (large cap)
-        "MRNA", "REGN", "VRTX", "BIIB",
-        # Energy
-        "XOM", "CVX", "OXY", "SLB",
-        # Financials
-        "JPM", "GS", "MS", "BAC",
-        # Industrials
-        "CAT", "DE", "BA", "LMT"
+    # =========================================================================
+    # WATCHLIST AMPLIADA - ALTO POTENCIAL DE CRECIMIENTO
+    # =========================================================================
+
+    # High-Growth Tech & AI
+    WATCHLIST_TECH_AI = [
+        "NVDA", "AMD", "SMCI", "ARM", "AVGO", "MRVL", "MU",  # Semiconductores AI
+        "PLTR", "AI", "BBAI", "SOUN", "UPST",  # AI pure plays
+        "PATH", "SNOW", "DDOG", "NET", "CRWD", "ZS",  # Cloud/Cyber
+        "IONQ", "RGTI", "QUBT",  # Quantum computing
+        "RKLB", "LUNR", "RDW",  # Space tech
     ]
 
-    DEFAULT_WATCHLIST_EU = [
-        # Principales europeas disponibles en eToro
-        "ASML", "SAP", "LVMH", "NVO", "SHEL", "TTE", "SAN", "BNP"
+    # High-Beta Growth Stocks
+    WATCHLIST_HIGH_BETA = [
+        "TSLA", "RIVN", "LCID", "NIO", "XPEV", "LI",  # EV
+        "COIN", "MSTR", "MARA", "RIOT", "CLSK", "HUT",  # Crypto-related
+        "SHOP", "SQ", "AFRM", "SOFI", "HOOD", "NU",  # Fintech
+        "ROKU", "TTD", "MGNI", "PUBM",  # AdTech
+        "RBLX", "U", "TTWO", "EA",  # Gaming
     ]
+
+    # Small/Mid Caps con Momentum
+    WATCHLIST_SMALL_MID_CAPS = [
+        "APLD", "BTBT", "WULF", "CIFR", "IREN",  # Bitcoin miners
+        "GEVO", "BE", "PLUG", "FCEL", "BLDP",  # Clean energy
+        "JOBY", "ACHR", "LILM", "EVTL",  # eVTOL/Air taxis
+        "DNA", "CRSP", "BEAM", "EDIT", "NTLA",  # Gene editing
+        "RXRX", "EXAI", "SDGR", "ABCL",  # AI Biotech
+        "VLD", "DM", "XMTR", "PRNT",  # 3D Printing
+        "OPEN", "RDFN", "CVNA", "CARG",  # Real estate/auto tech
+        "ASTS", "IRDM", "GSAT",  # Satellite/Space
+    ]
+
+    # Biotech Especulativos (alto riesgo/alta recompensa)
+    WATCHLIST_BIOTECH_SPECULATIVE = [
+        "MRNA", "BNTX", "NVAX",  # Vacunas
+        "SAVA", "ACIU", "PRTA",  # Alzheimer
+        "SRPT", "BLUE", "VRTX",  # Gene therapy
+        "IONS", "ALNY", "ARWR",  # RNA therapeutics
+        "AXSM", "CPRX", "SAGE",  # CNS
+        "KRTX", "PTGX", "KRYS",  # Small cap biotech
+    ]
+
+    # High Short Interest (potencial squeeze)
+    WATCHLIST_HIGH_SHORT = [
+        "GME", "AMC", "BBBY", "KOSS",  # Meme classics
+        "CVNA", "UPST", "BYND", "LMND",  # High short growth
+        "FFIE", "GOEV", "WKHS", "RIDE",  # EV shorts
+        "SPCE", "VLDR", "LAZR",  # Tech shorts
+    ]
+
+    # IPOs Recientes y Growth Stories
+    WATCHLIST_RECENT_IPOS = [
+        "RDDT", "DUOL", "CART", "TOST",  # Recent tech IPOs
+        "KVYO", "BIRK", "ONON", "CAVA",  # Consumer
+        "VRT", "INTA", "IOT",  # Enterprise
+        "GRAB", "SE", "BABA", "JD", "PDD",  # Asian growth
+    ]
+
+    # Principales europeas en eToro
+    WATCHLIST_EU = [
+        "ASML", "SAP", "NVO",  # Large caps
+        "SPOT", "FVRR", "WIX",  # Tech EU/Israel
+    ]
+
+    # =========================================================================
+    # COMPILAR WATCHLIST COMPLETA
+    # =========================================================================
+
+    DEFAULT_WATCHLIST_US = (
+        WATCHLIST_TECH_AI +
+        WATCHLIST_HIGH_BETA +
+        WATCHLIST_SMALL_MID_CAPS +
+        WATCHLIST_BIOTECH_SPECULATIVE +
+        WATCHLIST_HIGH_SHORT +
+        WATCHLIST_RECENT_IPOS
+    )
+
+    DEFAULT_WATCHLIST_EU = WATCHLIST_EU
 
     def __init__(self):
         self.api = MarketDataAPI()
