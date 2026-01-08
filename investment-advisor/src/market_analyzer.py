@@ -17,34 +17,35 @@ import sys
 
 @dataclass
 class TradingConfig:
-    """Parametros de trading configurables"""
+    """Parametros de trading configurables - MODO AGRESIVO"""
     capital: float = 500.0
     leverage: int = 5
-    max_stop_loss_pct: float = 5.0  # 5% = 25% real con x5
-    min_risk_reward: float = 3.0
+    max_stop_loss_pct: float = 8.0  # 8% = 40% real con x5 (mas agresivo)
+    min_risk_reward: float = 2.5  # Bajado de 3.0 para mas oportunidades
     position_size_normal: float = 5.0  # % del capital
-    position_size_exceptional: float = 10.0
-    max_concurrent_positions: int = 2
-    min_holding_days: int = 3
-    max_holding_days: int = 10
+    position_size_exceptional: float = 15.0  # Subido para plays de alta conviccion
+    max_concurrent_positions: int = 3  # Mas posiciones simultaneas
+    min_holding_days: int = 1  # Permitir day trades
+    max_holding_days: int = 14  # Extendido para swing trades largos
 
-    # Filtros de seleccion
-    min_market_cap: float = 300_000_000  # $300M
-    max_market_cap: float = 50_000_000_000  # $50B
-    min_beta: float = 1.5
-    preferred_beta: float = 1.8
-    min_price: float = 5.0
-    max_price: float = 200.0
-    max_spread_pct: float = 0.5
+    # Filtros de seleccion - MAS PERMISIVOS PARA SMALL CAPS
+    min_market_cap: float = 50_000_000  # $50M (antes $300M) - permite micro caps
+    max_market_cap: float = 100_000_000_000  # $100B (antes $50B) - permite mega caps con momentum
+    min_beta: float = 1.0  # Bajado de 1.5
+    preferred_beta: float = 2.0  # Subido - queremos volatilidad
+    min_price: float = 1.0  # Bajado de $5 - permite penny stocks de calidad
+    max_price: float = 500.0  # Subido de $200
+    max_spread_pct: float = 1.0  # Mas permisivo con spread
 
-    # Volumen minimo por market cap
+    # Volumen minimo por market cap - REDUCIDO
     volume_thresholds: dict = None
 
     def __post_init__(self):
         self.volume_thresholds = {
-            "small": 2_000_000,   # $300M-$1B: 2M shares
-            "mid": 1_500_000,     # $1B-$5B: 1.5M shares
-            "large": 1_000_000    # >$5B: 1M shares
+            "micro": 500_000,    # <$100M: 500K shares
+            "small": 750_000,    # $100M-$1B: 750K shares (antes 2M)
+            "mid": 500_000,      # $1B-$10B: 500K shares (antes 1.5M)
+            "large": 300_000     # >$10B: 300K shares (antes 1M)
         }
 
 config = TradingConfig()
@@ -101,26 +102,48 @@ class MarketDataAPI:
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
             params = {"interval": "1d", "range": "5d"}
-            headers = {"User-Agent": "Mozilla/5.0"}
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+                "Accept-Language": "en-US,en;q=0.9"
+            }
 
-            response = requests.get(url, params=params, headers=headers, timeout=10)
+            response = requests.get(url, params=params, headers=headers, timeout=15)
+
             if response.status_code == 200:
                 data = response.json()
-                result = data.get("chart", {}).get("result", [{}])[0]
+                chart_result = data.get("chart", {}).get("result")
+
+                if not chart_result or len(chart_result) == 0:
+                    print(f"[WARN] No data for {symbol}")
+                    return None
+
+                result = chart_result[0]
                 meta = result.get("meta", {})
 
                 price = meta.get("regularMarketPrice", 0)
-                prev_close = meta.get("previousClose", price)
-                change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
+                prev_close = meta.get("previousClose", 0) or meta.get("chartPreviousClose", 0)
+
+                # Calcular cambio porcentual
+                if prev_close and prev_close > 0:
+                    change_pct = ((price - prev_close) / prev_close * 100)
+                else:
+                    change_pct = 0
 
                 return {
                     "symbol": symbol,
-                    "price": price,
-                    "prev_close": prev_close,
+                    "price": round(price, 2) if price else 0,
+                    "prev_close": round(prev_close, 2) if prev_close else 0,
                     "change_pct": round(change_pct, 2)
                 }
+            else:
+                print(f"[WARN] Yahoo API returned {response.status_code} for {symbol}")
+
+        except requests.exceptions.Timeout:
+            print(f"[WARN] Timeout fetching {symbol}")
         except Exception as e:
-            print(f"Error fetching {symbol}: {e}")
+            print(f"[ERROR] Fetching {symbol}: {e}")
+
         return None
 
     def _determine_regime(self, market_data: dict) -> str:
@@ -150,33 +173,47 @@ class MarketDataAPI:
         try:
             url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
             params = {"modules": "summaryDetail,defaultKeyStatistics,financialData"}
-            headers = {"User-Agent": "Mozilla/5.0"}
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json"
+            }
 
-            response = requests.get(url, params=params, headers=headers, timeout=10)
+            response = requests.get(url, params=params, headers=headers, timeout=15)
             if response.status_code == 200:
                 data = response.json()
-                result = data.get("quoteSummary", {}).get("result", [{}])[0]
+                quote_result = data.get("quoteSummary", {}).get("result")
 
-                summary = result.get("summaryDetail", {})
-                stats = result.get("defaultKeyStatistics", {})
-                financials = result.get("financialData", {})
+                if quote_result and len(quote_result) > 0:
+                    result = quote_result[0]
 
-                quote.update({
-                    "market_cap": summary.get("marketCap", {}).get("raw"),
-                    "beta": summary.get("beta", {}).get("raw"),
-                    "volume": summary.get("volume", {}).get("raw"),
-                    "avg_volume": summary.get("averageVolume", {}).get("raw"),
-                    "52w_high": summary.get("fiftyTwoWeekHigh", {}).get("raw"),
-                    "52w_low": summary.get("fiftyTwoWeekLow", {}).get("raw"),
-                    "pe_ratio": summary.get("trailingPE", {}).get("raw"),
-                    "short_ratio": stats.get("shortRatio", {}).get("raw"),
-                    "short_pct": stats.get("shortPercentOfFloat", {}).get("raw"),
-                    "revenue_growth": financials.get("revenueGrowth", {}).get("raw"),
-                    "profit_margin": financials.get("profitMargins", {}).get("raw"),
-                })
+                    summary = result.get("summaryDetail", {})
+                    stats = result.get("defaultKeyStatistics", {})
+                    financials = result.get("financialData", {})
+
+                    # Helper para extraer valores de forma segura
+                    def safe_get(d, key):
+                        val = d.get(key, {})
+                        if isinstance(val, dict):
+                            return val.get("raw")
+                        return val
+
+                    quote.update({
+                        "market_cap": safe_get(summary, "marketCap"),
+                        "beta": safe_get(summary, "beta"),
+                        "volume": safe_get(summary, "volume"),
+                        "avg_volume": safe_get(summary, "averageVolume"),
+                        "52w_high": safe_get(summary, "fiftyTwoWeekHigh"),
+                        "52w_low": safe_get(summary, "fiftyTwoWeekLow"),
+                        "pe_ratio": safe_get(summary, "trailingPE"),
+                        "short_ratio": safe_get(stats, "shortRatio"),
+                        "short_pct": safe_get(stats, "shortPercentOfFloat"),
+                        "revenue_growth": safe_get(financials, "revenueGrowth"),
+                        "profit_margin": safe_get(financials, "profitMargins"),
+                    })
 
         except Exception as e:
-            print(f"Error obteniendo datos adicionales de {symbol}: {e}")
+            print(f"[WARN] Error datos adicionales {symbol}: {e}")
+            # Continuar con datos basicos si falla
 
         return quote
 
@@ -276,28 +313,28 @@ class OpportunityScorer:
             "volume": stock_data.get("avg_volume"),
             "scores": scores,
             "total_score": round(final_score, 1),
-            "signal": "COMPRA" if final_score >= 75 and not exclusion_reason else "WATCHLIST" if final_score >= 60 else "SKIP",
+            "signal": "COMPRA" if final_score >= 72 and not exclusion_reason else "WATCHLIST" if final_score >= 56 else "SKIP",
             "exclusion_reason": exclusion_reason,
-            "trade_setup": self._calculate_trade_setup(stock_data) if final_score >= 75 else None
+            "trade_setup": self._calculate_trade_setup(stock_data) if final_score >= 72 else None
         }
 
     def _score_timing(self, catalyst_info: dict) -> int:
         """Puntua el timing del catalizador (1-5)"""
         if not catalyst_info:
-            return 2
+            return 3  # Neutral sin catalizador (antes era 2)
 
         days_to_catalyst = catalyst_info.get("days_ahead", 30)
 
         if days_to_catalyst <= 3:
             return 5
         elif days_to_catalyst <= 7:
-            return 4
+            return 5
         elif days_to_catalyst <= 14:
-            return 3
+            return 4
         elif days_to_catalyst <= 21:
-            return 2
+            return 3
         else:
-            return 1
+            return 3
 
     def _score_technical(self, stock_data: dict) -> int:
         """Puntua el setup tecnico (1-5)"""
@@ -306,6 +343,7 @@ class OpportunityScorer:
         price = stock_data.get("price", 0)
         high_52w = stock_data.get("52w_high", 0)
         low_52w = stock_data.get("52w_low", 0)
+        change_pct = stock_data.get("change_pct", 0)
 
         if high_52w and low_52w and price:
             # Posicion en rango 52 semanas
@@ -313,16 +351,27 @@ class OpportunityScorer:
             if range_52w > 0:
                 position = (price - low_52w) / range_52w
 
-                if position > 0.8:  # Cerca de maximos
+                if position > 0.85:  # Muy cerca de maximos - breakout potential
+                    score = 5
+                elif position > 0.7:  # Zona alta con momentum
+                    score = 5
+                elif position > 0.5:  # Zona media-alta
                     score = 4
-                elif position > 0.6:  # Zona alta
-                    score = 5  # Momentum alcista
-                elif position < 0.3:  # Cerca de minimos
-                    score = 2
-                else:
+                elif position > 0.3:  # Zona media
                     score = 3
+                else:  # Cerca de minimos
+                    score = 2
 
-        # Ajustar por volumen
+        # Bonus por momentum del dia (cambio positivo)
+        if change_pct:
+            if change_pct > 3:
+                score = min(5, score + 1)
+            elif change_pct > 1:
+                score = min(5, score + 0)  # Mantener
+            elif change_pct < -3:
+                score = max(1, score - 1)
+
+        # Ajustar por volumen inusual
         volume = stock_data.get("volume", 0)
         avg_volume = stock_data.get("avg_volume", 1)
         if avg_volume and volume > avg_volume * 1.5:
@@ -386,7 +435,7 @@ class OpportunityScorer:
     def _score_catalyst(self, catalyst_info: dict) -> int:
         """Puntua la calidad/probabilidad del catalizador (1-5)"""
         if not catalyst_info:
-            return 2
+            return 3  # Neutral sin catalizador (antes era 2)
 
         catalyst_type = catalyst_info.get("type", "")
 
@@ -398,7 +447,7 @@ class OpportunityScorer:
         if any(c in catalyst_type.lower() for c in high_prob):
             return 5
         elif any(c in catalyst_type.lower() for c in medium_prob):
-            return 3
+            return 4  # Earnings subio de 3 a 4
         elif any(c in catalyst_type.lower() for c in low_prob):
             return 2
 
@@ -426,15 +475,18 @@ class OpportunityScorer:
         if beta and beta < config.min_beta:
             return f"Beta muy bajo ({beta:.2f} < {config.min_beta})"
 
-        # Verificar volumen segun market cap
+        # Verificar volumen segun market cap (thresholds reducidos para modo agresivo)
         if market_cap and avg_volume:
-            if market_cap < 1e9:  # Small cap
+            if market_cap < 100e6:  # Micro cap <$100M
+                if avg_volume < config.volume_thresholds["micro"]:
+                    return f"Volumen insuficiente para micro cap ({avg_volume/1e6:.1f}M < {config.volume_thresholds['micro']/1e6:.1f}M)"
+            elif market_cap < 1e9:  # Small cap $100M-$1B
                 if avg_volume < config.volume_thresholds["small"]:
                     return f"Volumen insuficiente para small cap"
-            elif market_cap < 5e9:  # Mid cap
+            elif market_cap < 10e9:  # Mid cap $1B-$10B
                 if avg_volume < config.volume_thresholds["mid"]:
                     return f"Volumen insuficiente para mid cap"
-            else:  # Large cap
+            else:  # Large cap >$10B
                 if avg_volume < config.volume_thresholds["large"]:
                     return f"Volumen insuficiente para large cap"
 
@@ -490,34 +542,116 @@ class OpportunityScorer:
 class MarketScanner:
     """Escaner de oportunidades en el mercado"""
 
-    # Watchlist por defecto de acciones de interes
-    DEFAULT_WATCHLIST_US = [
-        # Tech high-beta
-        "NVDA", "AMD", "TSLA", "META", "GOOGL", "AMZN", "MSFT", "AAPL",
-        # Semiconductores
-        "AVGO", "MRVL", "MU", "QCOM", "ARM", "SMCI",
-        # Software/Cloud
-        "CRM", "NOW", "SNOW", "PLTR", "DDOG", "NET",
-        # Consumer
-        "SHOP", "COIN", "SQ", "PYPL", "ABNB",
-        # Biotech (large cap)
-        "MRNA", "REGN", "VRTX", "BIIB",
-        # Energy
-        "XOM", "CVX", "OXY", "SLB",
-        # Financials
-        "JPM", "GS", "MS", "BAC",
-        # Industrials
-        "CAT", "DE", "BA", "LMT"
+    # =========================================================================
+    # WATCHLIST AMPLIADA - ALTO POTENCIAL DE CRECIMIENTO
+    # =========================================================================
+
+    # High-Growth Tech & AI
+    WATCHLIST_TECH_AI = [
+        "NVDA", "AMD", "SMCI", "ARM", "AVGO", "MRVL", "MU",  # Semiconductores AI
+        "PLTR", "AI", "BBAI", "SOUN", "UPST",  # AI pure plays
+        "PATH", "SNOW", "DDOG", "NET", "CRWD", "ZS",  # Cloud/Cyber
+        "IONQ", "RGTI", "QUBT",  # Quantum computing
+        "RKLB", "LUNR", "RDW",  # Space tech
     ]
 
-    DEFAULT_WATCHLIST_EU = [
-        # Principales europeas disponibles en eToro
-        "ASML", "SAP", "LVMH", "NVO", "SHEL", "TTE", "SAN", "BNP"
+    # High-Beta Growth Stocks
+    WATCHLIST_HIGH_BETA = [
+        "TSLA", "RIVN", "LCID", "NIO", "XPEV", "LI",  # EV
+        "COIN", "MSTR", "MARA", "RIOT", "CLSK", "HUT",  # Crypto-related
+        "SHOP", "SQ", "AFRM", "SOFI", "HOOD", "NU",  # Fintech
+        "ROKU", "TTD", "MGNI", "PUBM",  # AdTech
+        "RBLX", "U", "TTWO", "EA",  # Gaming
     ]
+
+    # Small/Mid Caps con Momentum
+    WATCHLIST_SMALL_MID_CAPS = [
+        "APLD", "BTBT", "WULF", "CIFR", "IREN",  # Bitcoin miners
+        "GEVO", "BE", "PLUG", "FCEL", "BLDP",  # Clean energy
+        "JOBY", "ACHR", "LILM", "EVTL",  # eVTOL/Air taxis
+        "DNA", "CRSP", "BEAM", "EDIT", "NTLA",  # Gene editing
+        "RXRX", "EXAI", "SDGR", "ABCL",  # AI Biotech
+        "VLD", "DM", "XMTR", "PRNT",  # 3D Printing
+        "OPEN", "RDFN", "CVNA", "CARG",  # Real estate/auto tech
+        "ASTS", "IRDM", "GSAT",  # Satellite/Space
+    ]
+
+    # Biotech Especulativos (alto riesgo/alta recompensa)
+    WATCHLIST_BIOTECH_SPECULATIVE = [
+        "MRNA", "BNTX", "NVAX",  # Vacunas
+        "SAVA", "ACIU", "PRTA",  # Alzheimer
+        "SRPT", "BLUE", "VRTX",  # Gene therapy
+        "IONS", "ALNY", "ARWR",  # RNA therapeutics
+        "AXSM", "CPRX", "SAGE",  # CNS
+        "KRTX", "PTGX", "KRYS",  # Small cap biotech
+    ]
+
+    # High Short Interest (potencial squeeze)
+    WATCHLIST_HIGH_SHORT = [
+        "GME", "AMC", "BBBY", "KOSS",  # Meme classics
+        "CVNA", "UPST", "BYND", "LMND",  # High short growth
+        "FFIE", "GOEV", "WKHS", "RIDE",  # EV shorts
+        "SPCE", "VLDR", "LAZR",  # Tech shorts
+    ]
+
+    # IPOs Recientes y Growth Stories
+    WATCHLIST_RECENT_IPOS = [
+        "RDDT", "DUOL", "CART", "TOST",  # Recent tech IPOs
+        "KVYO", "BIRK", "ONON", "CAVA",  # Consumer
+        "VRT", "INTA", "IOT",  # Enterprise
+        "GRAB", "SE", "BABA", "JD", "PDD",  # Asian growth
+    ]
+
+    # Principales europeas en eToro
+    WATCHLIST_EU = [
+        "ASML", "SAP", "NVO",  # Large caps
+        "SPOT", "FVRR", "WIX",  # Tech EU/Israel
+    ]
+
+    # =========================================================================
+    # COMPILAR WATCHLIST COMPLETA
+    # =========================================================================
+
+    DEFAULT_WATCHLIST_US = (
+        WATCHLIST_TECH_AI +
+        WATCHLIST_HIGH_BETA +
+        WATCHLIST_SMALL_MID_CAPS +
+        WATCHLIST_BIOTECH_SPECULATIVE +
+        WATCHLIST_HIGH_SHORT +
+        WATCHLIST_RECENT_IPOS
+    )
+
+    DEFAULT_WATCHLIST_EU = WATCHLIST_EU
 
     def __init__(self):
         self.api = MarketDataAPI()
         self.scorer = OpportunityScorer(self.api)
+        self.earnings_calendar = {}  # Cache de earnings
+
+    def _load_earnings_calendar(self):
+        """Carga el calendario de earnings para los proximos 14 dias"""
+        print("  Cargando calendario de earnings...")
+        earnings_list = self.api.get_earnings_calendar(days_ahead=14)
+
+        for earning in earnings_list:
+            symbol = earning.get("symbol", "")
+            if symbol:
+                date_str = earning.get("date", "")
+                if date_str:
+                    try:
+                        earning_date = datetime.strptime(date_str, "%Y-%m-%d")
+                        days_ahead = (earning_date - datetime.now()).days
+                        self.earnings_calendar[symbol] = {
+                            "date": date_str,
+                            "days_ahead": max(0, days_ahead),
+                            "type": "earnings",
+                            "eps_estimate": earning.get("epsEstimate"),
+                            "revenue_estimate": earning.get("revenueEstimate")
+                        }
+                    except:
+                        pass
+
+        print(f"  Earnings encontrados: {len(self.earnings_calendar)} acciones con earnings proximos")
 
     def scan_market(self, watchlist: list = None) -> dict:
         """Escanea el mercado en busca de oportunidades"""
@@ -535,7 +669,10 @@ class MarketScanner:
         print(f"S&P 500: {market_status.get('sp500_change', 'N/A')}%")
         print(f"Nasdaq: {market_status.get('nasdaq_change', 'N/A')}%")
 
-        # 2. Escanear watchlist
+        # 2. Cargar calendario de earnings (catalizadores)
+        self._load_earnings_calendar()
+
+        # 3. Escanear watchlist
         opportunities = []
         watchlist_items = []
         skipped = []
@@ -543,7 +680,12 @@ class MarketScanner:
         for symbol in watchlist:
             print(f"  Analizando {symbol}...", end=" ")
 
-            result = self.scorer.score_opportunity(symbol)
+            # Obtener info de catalizador si existe
+            catalyst_info = self.earnings_calendar.get(symbol)
+            if catalyst_info:
+                print(f"[EARNINGS en {catalyst_info['days_ahead']}d] ", end="")
+
+            result = self.scorer.score_opportunity(symbol, catalyst_info)
 
             if result.get("error"):
                 print(f"ERROR: {result['error']}")
@@ -572,7 +714,8 @@ class MarketScanner:
             "watchlist": watchlist_items[:10],   # Top 10 watchlist
             "total_scanned": len(watchlist),
             "opportunities_found": len(opportunities),
-            "watchlist_count": len(watchlist_items)
+            "watchlist_count": len(watchlist_items),
+            "earnings_detected": len(self.earnings_calendar)
         }
 
     def format_report(self, scan_result: dict) -> str:
