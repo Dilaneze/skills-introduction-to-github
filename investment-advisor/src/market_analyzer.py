@@ -101,26 +101,48 @@ class MarketDataAPI:
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
             params = {"interval": "1d", "range": "5d"}
-            headers = {"User-Agent": "Mozilla/5.0"}
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+                "Accept-Language": "en-US,en;q=0.9"
+            }
 
-            response = requests.get(url, params=params, headers=headers, timeout=10)
+            response = requests.get(url, params=params, headers=headers, timeout=15)
+
             if response.status_code == 200:
                 data = response.json()
-                result = data.get("chart", {}).get("result", [{}])[0]
+                chart_result = data.get("chart", {}).get("result")
+
+                if not chart_result or len(chart_result) == 0:
+                    print(f"[WARN] No data for {symbol}")
+                    return None
+
+                result = chart_result[0]
                 meta = result.get("meta", {})
 
                 price = meta.get("regularMarketPrice", 0)
-                prev_close = meta.get("previousClose", price)
-                change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
+                prev_close = meta.get("previousClose", 0) or meta.get("chartPreviousClose", 0)
+
+                # Calcular cambio porcentual
+                if prev_close and prev_close > 0:
+                    change_pct = ((price - prev_close) / prev_close * 100)
+                else:
+                    change_pct = 0
 
                 return {
                     "symbol": symbol,
-                    "price": price,
-                    "prev_close": prev_close,
+                    "price": round(price, 2) if price else 0,
+                    "prev_close": round(prev_close, 2) if prev_close else 0,
                     "change_pct": round(change_pct, 2)
                 }
+            else:
+                print(f"[WARN] Yahoo API returned {response.status_code} for {symbol}")
+
+        except requests.exceptions.Timeout:
+            print(f"[WARN] Timeout fetching {symbol}")
         except Exception as e:
-            print(f"Error fetching {symbol}: {e}")
+            print(f"[ERROR] Fetching {symbol}: {e}")
+
         return None
 
     def _determine_regime(self, market_data: dict) -> str:
@@ -150,33 +172,47 @@ class MarketDataAPI:
         try:
             url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
             params = {"modules": "summaryDetail,defaultKeyStatistics,financialData"}
-            headers = {"User-Agent": "Mozilla/5.0"}
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json"
+            }
 
-            response = requests.get(url, params=params, headers=headers, timeout=10)
+            response = requests.get(url, params=params, headers=headers, timeout=15)
             if response.status_code == 200:
                 data = response.json()
-                result = data.get("quoteSummary", {}).get("result", [{}])[0]
+                quote_result = data.get("quoteSummary", {}).get("result")
 
-                summary = result.get("summaryDetail", {})
-                stats = result.get("defaultKeyStatistics", {})
-                financials = result.get("financialData", {})
+                if quote_result and len(quote_result) > 0:
+                    result = quote_result[0]
 
-                quote.update({
-                    "market_cap": summary.get("marketCap", {}).get("raw"),
-                    "beta": summary.get("beta", {}).get("raw"),
-                    "volume": summary.get("volume", {}).get("raw"),
-                    "avg_volume": summary.get("averageVolume", {}).get("raw"),
-                    "52w_high": summary.get("fiftyTwoWeekHigh", {}).get("raw"),
-                    "52w_low": summary.get("fiftyTwoWeekLow", {}).get("raw"),
-                    "pe_ratio": summary.get("trailingPE", {}).get("raw"),
-                    "short_ratio": stats.get("shortRatio", {}).get("raw"),
-                    "short_pct": stats.get("shortPercentOfFloat", {}).get("raw"),
-                    "revenue_growth": financials.get("revenueGrowth", {}).get("raw"),
-                    "profit_margin": financials.get("profitMargins", {}).get("raw"),
-                })
+                    summary = result.get("summaryDetail", {})
+                    stats = result.get("defaultKeyStatistics", {})
+                    financials = result.get("financialData", {})
+
+                    # Helper para extraer valores de forma segura
+                    def safe_get(d, key):
+                        val = d.get(key, {})
+                        if isinstance(val, dict):
+                            return val.get("raw")
+                        return val
+
+                    quote.update({
+                        "market_cap": safe_get(summary, "marketCap"),
+                        "beta": safe_get(summary, "beta"),
+                        "volume": safe_get(summary, "volume"),
+                        "avg_volume": safe_get(summary, "averageVolume"),
+                        "52w_high": safe_get(summary, "fiftyTwoWeekHigh"),
+                        "52w_low": safe_get(summary, "fiftyTwoWeekLow"),
+                        "pe_ratio": safe_get(summary, "trailingPE"),
+                        "short_ratio": safe_get(stats, "shortRatio"),
+                        "short_pct": safe_get(stats, "shortPercentOfFloat"),
+                        "revenue_growth": safe_get(financials, "revenueGrowth"),
+                        "profit_margin": safe_get(financials, "profitMargins"),
+                    })
 
         except Exception as e:
-            print(f"Error obteniendo datos adicionales de {symbol}: {e}")
+            print(f"[WARN] Error datos adicionales {symbol}: {e}")
+            # Continuar con datos basicos si falla
 
         return quote
 
