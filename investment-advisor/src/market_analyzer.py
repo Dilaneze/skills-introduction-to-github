@@ -564,34 +564,34 @@ class MarketScanner:
         "RBLX", "U", "TTWO", "EA",  # Gaming
     ]
 
-    # Small/Mid Caps con Momentum
+    # Small/Mid Caps con Momentum - Limpiado tickers muertos
     WATCHLIST_SMALL_MID_CAPS = [
         "APLD", "BTBT", "WULF", "CIFR", "IREN",  # Bitcoin miners
         "GEVO", "BE", "PLUG", "FCEL", "BLDP",  # Clean energy
         "JOBY", "ACHR", "LILM", "EVTL",  # eVTOL/Air taxis
         "DNA", "CRSP", "BEAM", "EDIT", "NTLA",  # Gene editing
-        "RXRX", "EXAI", "SDGR", "ABCL",  # AI Biotech
-        "VLD", "DM", "XMTR", "PRNT",  # 3D Printing
-        "OPEN", "RDFN", "CVNA", "CARG",  # Real estate/auto tech
+        "RXRX", "SDGR", "ABCL",  # AI Biotech (EXAI delisted)
+        "XMTR", "PRNT", "NNDM", "SSYS",  # 3D Printing (VLD, DM delisted)
+        "OPEN", "CVNA", "CARG", "CHPT",  # Real estate/auto/EV (RDFN delisted)
         "ASTS", "IRDM", "GSAT",  # Satellite/Space
     ]
 
-    # Biotech Especulativos (alto riesgo/alta recompensa)
+    # Biotech Especulativos (alto riesgo/alta recompensa) - Limpiado
     WATCHLIST_BIOTECH_SPECULATIVE = [
         "MRNA", "BNTX", "NVAX",  # Vacunas
         "SAVA", "ACIU", "PRTA",  # Alzheimer
-        "SRPT", "BLUE", "VRTX",  # Gene therapy
+        "SRPT", "VRTX",  # Gene therapy (BLUE delisted)
         "IONS", "ALNY", "ARWR",  # RNA therapeutics
-        "AXSM", "CPRX", "SAGE",  # CNS
-        "KRTX", "PTGX", "KRYS",  # Small cap biotech
+        "AXSM", "CPRX",  # CNS (SAGE issues)
+        "PTGX", "KRYS", "IMVT", "MDGL",  # Small cap biotech (KRTX delisted)
     ]
 
-    # High Short Interest (potencial squeeze)
+    # High Short Interest (potencial squeeze) - Limpiado tickers muertos
     WATCHLIST_HIGH_SHORT = [
-        "GME", "AMC", "BBBY", "KOSS",  # Meme classics
-        "CVNA", "UPST", "BYND", "LMND",  # High short growth
-        "FFIE", "GOEV", "WKHS", "RIDE",  # EV shorts
-        "SPCE", "VLDR", "LAZR",  # Tech shorts
+        "GME", "AMC", "KOSS",  # Meme classics (BBBY delisted)
+        "BYND", "LMND",  # High short growth (CVNA/UPST ya en otra lista)
+        "GOEV", "WKHS",  # EV shorts (FFIE, RIDE delisted)
+        "SPCE", "LAZR",  # Tech shorts (VLDR delisted)
     ]
 
     # IPOs Recientes y Growth Stories
