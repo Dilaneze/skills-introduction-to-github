@@ -17,35 +17,38 @@ import sys
 
 @dataclass
 class TradingConfig:
-    """Parametros de trading configurables - MODO AGRESIVO"""
+    """Parametros de trading configurables - PROFESIONAL SWING TRADING"""
     capital: float = 500.0
     leverage: int = 5
-    max_stop_loss_pct: float = 8.0  # 8% = 40% real con x5 (mas agresivo)
-    min_risk_reward: float = 2.5  # Bajado de 3.0 para mas oportunidades
-    position_size_normal: float = 5.0  # % del capital
-    position_size_exceptional: float = 15.0  # Subido para plays de alta conviccion
-    max_concurrent_positions: int = 3  # Mas posiciones simultaneas
+    max_stop_loss_pct: float = 10.0  # 10% = 50% real con x5 (ajustado para small caps volatiles)
+    min_risk_reward: float = 3.0  # Minimo 3:1 R:R obligatorio
+    position_size_normal: float = 10.0  # 10% del capital (50EUR = 250EUR exposicion)
+    position_size_exceptional: float = 15.0  # Para plays de alta conviccion
+    max_concurrent_positions: int = 2  # Max 2 posiciones simultaneas (gestion de riesgo)
     min_holding_days: int = 1  # Permitir day trades
-    max_holding_days: int = 14  # Extendido para swing trades largos
+    max_holding_days: int = 14  # Swing trades largos
 
-    # Filtros de seleccion - MAS PERMISIVOS PARA SMALL CAPS
-    min_market_cap: float = 50_000_000  # $50M (antes $300M) - permite micro caps
-    max_market_cap: float = 100_000_000_000  # $100B (antes $50B) - permite mega caps con momentum
-    min_beta: float = 1.0  # Bajado de 1.5
-    preferred_beta: float = 2.0  # Subido - queremos volatilidad
-    min_price: float = 1.0  # Bajado de $5 - permite penny stocks de calidad
-    max_price: float = 500.0  # Subido de $200
-    max_spread_pct: float = 1.0  # Mas permisivo con spread
+    # Target basado en % realista (no 52w high)
+    target_pct_conservative: float = 15.0  # Target minimo 15%
+    target_pct_aggressive: float = 20.0  # Target para setups fuertes
+
+    # Filtros de seleccion - EQUILIBRADOS
+    min_market_cap: float = 100_000_000  # $100M (micro caps muy arriesgados)
+    max_market_cap: float = 100_000_000_000  # $100B
+    min_beta: float = 1.5  # Beta minimo 1.5 para volatilidad necesaria
+    preferred_beta: float = 2.0  # Beta preferido
+    min_price: float = 2.0  # $2 minimo (evitar penny stocks extremos)
+    max_price: float = 500.0
+    max_spread_pct: float = 1.0
 
     # Volumen minimo por market cap - REDUCIDO
     volume_thresholds: dict = None
 
     def __post_init__(self):
         self.volume_thresholds = {
-            "micro": 500_000,    # <$100M: 500K shares
-            "small": 750_000,    # $100M-$1B: 750K shares (antes 2M)
-            "mid": 500_000,      # $1B-$10B: 500K shares (antes 1.5M)
-            "large": 300_000     # >$10B: 300K shares (antes 1M)
+            "small": 1_000_000,   # $100M-$1B: 1M shares minimo
+            "mid": 750_000,       # $1B-$10B: 750K shares
+            "large": 500_000      # >$10B: 500K shares
         }
 
 config = TradingConfig()
@@ -359,6 +362,22 @@ class OpportunityScorer:
         # Verificar filtros de exclusion
         exclusion_reason = self._check_exclusions(stock_data)
 
+        # Calcular trade setup solo para candidatos de alta puntuacion
+        trade_setup = None
+        if final_score >= 72 and not exclusion_reason:
+            trade_setup = self._calculate_trade_setup(stock_data)
+
+        # Determinar senal: COMPRA requiere score alto + sin exclusion + R:R valido
+        if final_score >= 72 and not exclusion_reason and trade_setup:
+            signal = "COMPRA"
+        elif final_score >= 72 and not exclusion_reason and not trade_setup:
+            signal = "WATCHLIST"  # Score alto pero R:R insuficiente
+            exclusion_reason = "R:R insuficiente (< 3:1)"
+        elif final_score >= 56:
+            signal = "WATCHLIST"
+        else:
+            signal = "SKIP"
+
         return {
             "symbol": symbol,
             "price": stock_data.get("price"),
@@ -367,9 +386,9 @@ class OpportunityScorer:
             "volume": stock_data.get("avg_volume"),
             "scores": scores,
             "total_score": round(final_score, 1),
-            "signal": "COMPRA" if final_score >= 72 and not exclusion_reason else "WATCHLIST" if final_score >= 56 else "SKIP",
+            "signal": signal,
             "exclusion_reason": exclusion_reason,
-            "trade_setup": self._calculate_trade_setup(stock_data) if final_score >= 72 else None
+            "trade_setup": trade_setup
         }
 
     def _score_timing(self, catalyst_info: dict) -> int:
@@ -529,14 +548,11 @@ class OpportunityScorer:
         if beta and beta < config.min_beta:
             return f"Beta muy bajo ({beta:.2f} < {config.min_beta})"
 
-        # Verificar volumen segun market cap (thresholds reducidos para modo agresivo)
+        # Verificar volumen segun market cap
         if market_cap and avg_volume:
-            if market_cap < 100e6:  # Micro cap <$100M
-                if avg_volume < config.volume_thresholds["micro"]:
-                    return f"Volumen insuficiente para micro cap ({avg_volume/1e6:.1f}M < {config.volume_thresholds['micro']/1e6:.1f}M)"
-            elif market_cap < 1e9:  # Small cap $100M-$1B
+            if market_cap < 1e9:  # Small cap $100M-$1B
                 if avg_volume < config.volume_thresholds["small"]:
-                    return f"Volumen insuficiente para small cap"
+                    return f"Volumen insuficiente para small cap ({avg_volume/1e6:.1f}M < {config.volume_thresholds['small']/1e6:.1f}M)"
             elif market_cap < 10e9:  # Mid cap $1B-$10B
                 if avg_volume < config.volume_thresholds["mid"]:
                     return f"Volumen insuficiente para mid cap"
@@ -546,46 +562,67 @@ class OpportunityScorer:
 
         return None
 
-    def _calculate_trade_setup(self, stock_data: dict) -> dict:
-        """Calcula el setup de trade concreto"""
+    def _calculate_trade_setup(self, stock_data: dict) -> Optional[dict]:
+        """Calcula el setup de trade concreto con validacion R:R"""
         price = stock_data.get("price", 0)
-        low_52w = stock_data.get("52w_low", price * 0.9)
-        high_52w = stock_data.get("52w_high", price * 1.2)
+        if not price:
+            return None
 
-        # Entry: precio actual con pequeno descuento
+        # Entry: precio actual con pequeno descuento para limit order
         entry = round(price * 0.995, 2)
 
-        # Stop Loss: maximo 5% o swing low reciente
-        stop_distance = min(price * 0.05, (price - low_52w) * 0.3)
-        stop_loss = round(price - stop_distance, 2)
-        stop_pct = round(((price - stop_loss) / price) * 100, 2)
+        # Stop Loss: usar % fijo basado en volatilidad del activo
+        beta = stock_data.get("beta", 1.5)
 
-        # Take Profit: minimo 3x el stop loss distance
-        min_target = price + (stop_distance * 3)
-        resistance_target = high_52w * 0.95
-        take_profit = round(max(min_target, resistance_target), 2)
-        target_pct = round(((take_profit - price) / price) * 100, 2)
+        # Stop loss adaptativo: 8% para beta normal, hasta 10% para alta volatilidad
+        if beta and beta >= 2.0:
+            stop_pct = config.max_stop_loss_pct  # 10% para alta volatilidad
+        elif beta and beta >= 1.5:
+            stop_pct = 8.0  # 8% para volatilidad media-alta
+        else:
+            stop_pct = 6.0  # 6% para baja volatilidad
 
-        # Risk:Reward ratio
-        rr_ratio = round(target_pct / stop_pct, 1) if stop_pct > 0 else 0
+        stop_loss = round(price * (1 - stop_pct / 100), 2)
 
-        # Position size
+        # Target: % realista basado en scoring y momentum (NO 52w high)
+        # Usar target conservador (15%) o agresivo (20%) segun momentum
+        change_pct = stock_data.get("change_pct", 0)
+
+        if change_pct and change_pct > 2:  # Momentum fuerte
+            target_pct = config.target_pct_aggressive  # 20%
+        else:
+            target_pct = config.target_pct_conservative  # 15%
+
+        take_profit = round(price * (1 + target_pct / 100), 2)
+
+        # VALIDACION CRITICA: R:R minimo 3:1
+        rr_ratio = round(target_pct / stop_pct, 2) if stop_pct > 0 else 0
+
+        if rr_ratio < config.min_risk_reward:
+            # R:R insuficiente - rechazar trade
+            return None
+
+        # Position size (10% del capital)
         position_pct = config.position_size_normal
         position_value = config.capital * (position_pct / 100)
         exposure_with_leverage = position_value * config.leverage
 
+        # Calcular perdida/ganancia en EUR
+        max_loss_eur = round(exposure_with_leverage * (stop_pct / 100), 2)
+        potential_gain_eur = round(exposure_with_leverage * (target_pct / 100), 2)
+
         return {
             "entry": entry,
             "stop_loss": stop_loss,
-            "stop_pct": stop_pct,
+            "stop_pct": round(stop_pct, 2),
             "take_profit": take_profit,
-            "target_pct": target_pct,
+            "target_pct": round(target_pct, 2),
             "risk_reward": rr_ratio,
             "position_pct": position_pct,
             "position_eur": round(position_value, 2),
             "exposure_eur": round(exposure_with_leverage, 2),
-            "max_loss_eur": round(exposure_with_leverage * (stop_pct / 100), 2),
-            "potential_gain_eur": round(exposure_with_leverage * (target_pct / 100), 2)
+            "max_loss_eur": max_loss_eur,
+            "potential_gain_eur": potential_gain_eur
         }
 
 
