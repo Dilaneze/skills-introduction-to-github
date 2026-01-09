@@ -32,12 +32,14 @@
   "scoring": {
     "min_score_for_buy": 75,
     "min_score_for_watchlist": 60,
-    "dimensions": {
-      "timing": {"weight": 1, "max": 5},
-      "technical": {"weight": 1, "max": 5},
-      "risk_reward": {"weight": 1, "max": 5},
-      "fundamental": {"weight": 1, "max": 5},
-      "catalyst": {"weight": 1, "max": 5}
+    "system": "virtual_committee",
+    "version": "2.0",
+    "committee_breakdown": {
+      "regime": {"max": 15, "description": "Druckenmiller - Contexto macro"},
+      "turtles": {"max": 25, "description": "Curtis Faith - Breakouts con volumen"},
+      "seykota": {"max": 20, "description": "Ed Seykota - Trend following"},
+      "catalyst": {"max": 25, "description": "Catalyst-driven timing"},
+      "risk_reward": {"max": 15, "description": "Simons - Validación estadística"}
     }
   },
 

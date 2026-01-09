@@ -1,6 +1,8 @@
 """
 CATALYST-DRIVEN SWING TRADING ANALYZER
 Asesor automatizado para mercados US y EU
+
+Versión 2.0 - Sistema de Comité Virtual con scoring trazable
 """
 
 import os
@@ -10,6 +12,9 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Optional
 import sys
+
+# Importar el comité virtual
+from committee import evaluate_opportunity
 
 # ============================================================================
 # CONFIGURACION
@@ -71,6 +76,7 @@ class MarketDataAPI:
             "vix": None,
             "sp500_change": None,
             "nasdaq_change": None,
+            "spy_above_200ema": True,  # Para el detector de régimen
             "market_regime": "UNKNOWN",
             "top_sectors": [],
             "premarket_movers": []
@@ -82,17 +88,22 @@ class MarketDataAPI:
             if vix_data:
                 result["vix"] = vix_data.get("price")
 
-            # S&P 500
-            sp500_data = self._fetch_yahoo_quote("^GSPC")
-            if sp500_data:
-                result["sp500_change"] = sp500_data.get("change_pct")
+            # S&P 500 (SPY como proxy)
+            spy_data = self._fetch_yahoo_quote("SPY")
+            if spy_data:
+                result["sp500_change"] = spy_data.get("change_pct")
+                # Verificar si SPY está sobre su EMA 200
+                spy_price = spy_data.get("price", 0)
+                spy_ema_200 = spy_data.get("ema_200", 0)
+                if spy_price > 0 and spy_ema_200 > 0:
+                    result["spy_above_200ema"] = spy_price > spy_ema_200
 
             # Nasdaq
             nasdaq_data = self._fetch_yahoo_quote("^IXIC")
             if nasdaq_data:
                 result["nasdaq_change"] = nasdaq_data.get("change_pct")
 
-            # Determinar regimen de mercado
+            # Determinar regimen de mercado (legacy - ahora lo hace el comité)
             result["market_regime"] = self._determine_regime(result)
 
         except Exception as e:
@@ -101,10 +112,11 @@ class MarketDataAPI:
         return result
 
     def _fetch_yahoo_quote(self, symbol: str) -> Optional[dict]:
-        """Fetch quote from Yahoo Finance"""
+        """Fetch quote from Yahoo Finance with historical data for technical indicators"""
         try:
+            # Obtener datos históricos de 200 días para calcular EMAs y ATR
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-            params = {"interval": "1d", "range": "5d"}
+            params = {"interval": "1d", "range": "200d"}
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "application/json",
@@ -123,6 +135,7 @@ class MarketDataAPI:
 
                 result = chart_result[0]
                 meta = result.get("meta", {})
+                indicators = result.get("indicators", {}).get("quote", [{}])[0]
 
                 price = meta.get("regularMarketPrice", 0)
                 prev_close = meta.get("previousClose", 0) or meta.get("chartPreviousClose", 0)
@@ -133,12 +146,32 @@ class MarketDataAPI:
                 else:
                     change_pct = 0
 
-                return {
+                # Extraer precios de cierre históricos
+                closes = indicators.get("close", [])
+                highs = indicators.get("high", [])
+                lows = indicators.get("low", [])
+                volumes = indicators.get("volume", [])
+
+                # Filtrar None values
+                closes = [c for c in closes if c is not None]
+                highs = [h for h in highs if h is not None]
+                lows = [l for l in lows if l is not None]
+                volumes = [v for v in volumes if v is not None]
+
+                # Calcular indicadores técnicos
+                technical_indicators = self._calculate_technical_indicators(closes, highs, lows, volumes)
+
+                quote = {
                     "symbol": symbol,
                     "price": round(price, 2) if price else 0,
                     "prev_close": round(prev_close, 2) if prev_close else 0,
                     "change_pct": round(change_pct, 2)
                 }
+
+                # Agregar indicadores técnicos
+                quote.update(technical_indicators)
+
+                return quote
             else:
                 print(f"[WARN] Yahoo API returned {response.status_code} for {symbol}")
 
@@ -148,6 +181,88 @@ class MarketDataAPI:
             print(f"[ERROR] Fetching {symbol}: {e}")
 
         return None
+
+    def _calculate_technical_indicators(self, closes: list, highs: list, lows: list, volumes: list) -> dict:
+        """Calcula indicadores técnicos necesarios para el comité"""
+        if not closes or len(closes) < 20:
+            return {}
+
+        current_price = closes[-1]
+        indicators = {}
+
+        # High de 20 días
+        if len(highs) >= 20:
+            indicators["high_20d"] = max(highs[-20:])
+
+        # Precio de hace 10 días
+        if len(closes) >= 11:
+            indicators["price_10d_ago"] = closes[-11]
+
+        # Volumen promedio de 20 días
+        if len(volumes) >= 20:
+            indicators["avg_volume_20d"] = sum(volumes[-20:]) / 20
+            indicators["volume"] = volumes[-1] if volumes else 0
+
+        # EMA 20
+        if len(closes) >= 20:
+            indicators["ema_20"] = self._calculate_ema(closes, 20)
+
+        # EMA 50
+        if len(closes) >= 50:
+            indicators["ema_50"] = self._calculate_ema(closes, 50)
+
+        # EMA 200
+        if len(closes) >= 200:
+            indicators["ema_200"] = self._calculate_ema(closes, 200)
+
+        # ATR 14
+        if len(closes) >= 14 and len(highs) >= 14 and len(lows) >= 14:
+            indicators["atr_14"] = self._calculate_atr(closes, highs, lows, 14)
+
+        return indicators
+
+    def _calculate_ema(self, prices: list, period: int) -> float:
+        """Calcula EMA (Exponential Moving Average)"""
+        if len(prices) < period:
+            return 0
+
+        # Multiplier: 2 / (period + 1)
+        multiplier = 2.0 / (period + 1)
+
+        # Inicializar EMA con SMA del primer periodo
+        sma = sum(prices[:period]) / period
+        ema = sma
+
+        # Calcular EMA para el resto
+        for price in prices[period:]:
+            ema = (price - ema) * multiplier + ema
+
+        return round(ema, 2)
+
+    def _calculate_atr(self, closes: list, highs: list, lows: list, period: int = 14) -> float:
+        """Calcula ATR (Average True Range)"""
+        if len(closes) < period + 1 or len(highs) < period or len(lows) < period:
+            return 0
+
+        true_ranges = []
+        for i in range(1, len(closes)):
+            high = highs[i]
+            low = lows[i]
+            prev_close = closes[i-1]
+
+            tr = max(
+                high - low,
+                abs(high - prev_close),
+                abs(low - prev_close)
+            )
+            true_ranges.append(tr)
+
+        # ATR es el promedio de los últimos 'period' true ranges
+        if len(true_ranges) >= period:
+            atr = sum(true_ranges[-period:]) / period
+            return round(atr, 2)
+
+        return 0
 
     def _determine_regime(self, market_data: dict) -> str:
         """Determina el regimen de mercado actual"""
@@ -332,199 +447,65 @@ class MarketDataAPI:
 
 
 # ============================================================================
-# MOTOR DE SCORING
+# MOTOR DE SCORING - COMITÉ VIRTUAL
 # ============================================================================
 
 class OpportunityScorer:
-    """Sistema de puntuacion de oportunidades"""
+    """Sistema de puntuación de oportunidades usando el Comité Virtual"""
 
-    def __init__(self, api: MarketDataAPI):
+    def __init__(self, api: MarketDataAPI, market_status: dict):
         self.api = api
+        self.market_status = market_status
 
     def score_opportunity(self, symbol: str, catalyst_info: dict = None) -> dict:
-        """Evalua y puntua una oportunidad de trading"""
+        """Evalúa y puntúa una oportunidad de trading usando el comité"""
 
         stock_data = self.api.get_stock_data(symbol)
         if not stock_data:
             return {"symbol": symbol, "score": 0, "error": "No se pudo obtener datos"}
 
-        scores = {
-            "timing": self._score_timing(catalyst_info),
-            "technical": self._score_technical(stock_data),
-            "risk_reward": self._score_risk_reward(stock_data),
-            "fundamental": self._score_fundamental(stock_data),
-            "catalyst": self._score_catalyst(catalyst_info)
-        }
-
-        total_score = sum(scores.values())
-        final_score = (total_score / 25) * 100
-
-        # Verificar filtros de exclusion
+        # Verificar filtros de exclusión básicos primero
         exclusion_reason = self._check_exclusions(stock_data)
+        if exclusion_reason:
+            return {
+                "symbol": symbol,
+                "price": stock_data.get("price"),
+                "market_cap": stock_data.get("market_cap"),
+                "beta": stock_data.get("beta"),
+                "volume": stock_data.get("avg_volume"),
+                "total_score": 0,
+                "signal": "SKIP",
+                "exclusion_reason": exclusion_reason,
+                "trade_setup": None
+            }
 
-        # Calcular trade setup solo para candidatos de alta puntuacion
-        trade_setup = None
-        if final_score >= 72 and not exclusion_reason:
-            trade_setup = self._calculate_trade_setup(stock_data)
+        # Llamar al comité virtual para evaluar
+        evaluation = evaluate_opportunity(
+            ticker=symbol,
+            ticker_data=stock_data,
+            market_data=self.market_status,
+            catalyst_info=catalyst_info,
+            capital=config.capital,
+            leverage=config.leverage
+        )
 
-        # Determinar senal: COMPRA requiere score alto + sin exclusion + R:R valido
-        if final_score >= 72 and not exclusion_reason and trade_setup:
-            signal = "COMPRA"
-        elif final_score >= 72 and not exclusion_reason and not trade_setup:
-            signal = "WATCHLIST"  # Score alto pero R:R insuficiente
-            exclusion_reason = "R:R insuficiente (< 3:1)"
-        elif final_score >= 56:
-            signal = "WATCHLIST"
-        else:
-            signal = "SKIP"
-
+        # Adaptar formato para compatibilidad con código existente
         return {
             "symbol": symbol,
             "price": stock_data.get("price"),
             "market_cap": stock_data.get("market_cap"),
             "beta": stock_data.get("beta"),
             "volume": stock_data.get("avg_volume"),
-            "scores": scores,
-            "total_score": round(final_score, 1),
-            "signal": signal,
-            "exclusion_reason": exclusion_reason,
-            "trade_setup": trade_setup
+            "total_score": evaluation["final_score"],
+            "signal": "COMPRA" if evaluation["decision"] == "BUY" else evaluation["decision"],
+            "exclusion_reason": None if evaluation["decision"] in ["BUY", "WATCHLIST"] else evaluation["decision_reason"],
+            "trade_setup": evaluation["trade_params"] if evaluation["decision"] == "BUY" else None,
+            # Nuevos campos del comité
+            "committee_evaluation": evaluation,
+            "breakdown": evaluation["breakdown"],
+            "reasoning": evaluation["reasoning"]
         }
 
-    def _score_timing(self, catalyst_info: dict) -> int:
-        """Puntua el timing del catalizador (1-5)"""
-        if not catalyst_info:
-            return 3  # Neutral sin catalizador (antes era 2)
-
-        days_to_catalyst = catalyst_info.get("days_ahead", 30)
-
-        if days_to_catalyst <= 3:
-            return 5
-        elif days_to_catalyst <= 7:
-            return 5
-        elif days_to_catalyst <= 14:
-            return 4
-        elif days_to_catalyst <= 21:
-            return 3
-        else:
-            return 3
-
-    def _score_technical(self, stock_data: dict) -> int:
-        """Puntua el setup tecnico (1-5)"""
-        score = 3  # Base neutral
-
-        price = stock_data.get("price", 0)
-        high_52w = stock_data.get("52w_high", 0)
-        low_52w = stock_data.get("52w_low", 0)
-        change_pct = stock_data.get("change_pct", 0)
-
-        if high_52w and low_52w and price:
-            # Posicion en rango 52 semanas
-            range_52w = high_52w - low_52w
-            if range_52w > 0:
-                position = (price - low_52w) / range_52w
-
-                if position > 0.85:  # Muy cerca de maximos - breakout potential
-                    score = 5
-                elif position > 0.7:  # Zona alta con momentum
-                    score = 5
-                elif position > 0.5:  # Zona media-alta
-                    score = 4
-                elif position > 0.3:  # Zona media
-                    score = 3
-                else:  # Cerca de minimos
-                    score = 2
-
-        # Bonus por momentum del dia (cambio positivo)
-        if change_pct:
-            if change_pct > 3:
-                score = min(5, score + 1)
-            elif change_pct > 1:
-                score = min(5, score + 0)  # Mantener
-            elif change_pct < -3:
-                score = max(1, score - 1)
-
-        # Ajustar por volumen inusual
-        volume = stock_data.get("volume", 0)
-        avg_volume = stock_data.get("avg_volume", 1)
-        if avg_volume and volume > avg_volume * 1.5:
-            score = min(5, score + 1)
-
-        return score
-
-    def _score_risk_reward(self, stock_data: dict) -> int:
-        """Puntua el ratio riesgo/recompensa potencial (1-5)"""
-        price = stock_data.get("price", 0)
-        high_52w = stock_data.get("52w_high", 0)
-        low_52w = stock_data.get("52w_low", 0)
-
-        if not price or not high_52w:
-            return 3
-
-        # Potencial de subida hasta 52w high
-        upside_pct = ((high_52w - price) / price) * 100 if price else 0
-
-        # Stop loss estimado (5% maximo)
-        stop_loss_pct = min(5, max(2, (price - low_52w) / price * 100 * 0.3)) if low_52w else 5
-
-        # Calcular R:R
-        if stop_loss_pct > 0:
-            rr_ratio = upside_pct / stop_loss_pct
-
-            if rr_ratio >= 4:
-                return 5
-            elif rr_ratio >= 3:
-                return 4
-            elif rr_ratio >= 2:
-                return 3
-            elif rr_ratio >= 1:
-                return 2
-            else:
-                return 1
-
-        return 3
-
-    def _score_fundamental(self, stock_data: dict) -> int:
-        """Puntua la calidad fundamental (1-5)"""
-        score = 3
-
-        revenue_growth = stock_data.get("revenue_growth")
-        profit_margin = stock_data.get("profit_margin")
-
-        if revenue_growth:
-            if revenue_growth > 0.20:  # >20% growth
-                score += 1
-            elif revenue_growth < 0:
-                score -= 1
-
-        if profit_margin:
-            if profit_margin > 0.15:  # >15% margin
-                score += 1
-            elif profit_margin < 0:
-                score -= 1
-
-        return max(1, min(5, score))
-
-    def _score_catalyst(self, catalyst_info: dict) -> int:
-        """Puntua la calidad/probabilidad del catalizador (1-5)"""
-        if not catalyst_info:
-            return 3  # Neutral sin catalizador (antes era 2)
-
-        catalyst_type = catalyst_info.get("type", "")
-
-        # Catalizadores de alta probabilidad
-        high_prob = ["earnings_beat_history", "fda_approval", "analyst_upgrade", "buyback"]
-        medium_prob = ["earnings", "conference", "product_launch"]
-        low_prob = ["rumor", "speculation"]
-
-        if any(c in catalyst_type.lower() for c in high_prob):
-            return 5
-        elif any(c in catalyst_type.lower() for c in medium_prob):
-            return 4  # Earnings subio de 3 a 4
-        elif any(c in catalyst_type.lower() for c in low_prob):
-            return 2
-
-        return 3
 
     def _check_exclusions(self, stock_data: dict) -> Optional[str]:
         """Verifica criterios de exclusion"""
@@ -561,69 +542,6 @@ class OpportunityScorer:
                     return f"Volumen insuficiente para large cap"
 
         return None
-
-    def _calculate_trade_setup(self, stock_data: dict) -> Optional[dict]:
-        """Calcula el setup de trade concreto con validacion R:R"""
-        price = stock_data.get("price", 0)
-        if not price:
-            return None
-
-        # Entry: precio actual con pequeno descuento para limit order
-        entry = round(price * 0.995, 2)
-
-        # Stop Loss: usar % fijo basado en volatilidad del activo
-        beta = stock_data.get("beta", 1.5)
-
-        # Stop loss adaptativo: 8% para beta normal, hasta 10% para alta volatilidad
-        if beta and beta >= 2.0:
-            stop_pct = config.max_stop_loss_pct  # 10% para alta volatilidad
-        elif beta and beta >= 1.5:
-            stop_pct = 8.0  # 8% para volatilidad media-alta
-        else:
-            stop_pct = 6.0  # 6% para baja volatilidad
-
-        stop_loss = round(price * (1 - stop_pct / 100), 2)
-
-        # Target: % realista basado en scoring y momentum (NO 52w high)
-        # Usar target conservador (15%) o agresivo (20%) segun momentum
-        change_pct = stock_data.get("change_pct", 0)
-
-        if change_pct and change_pct > 2:  # Momentum fuerte
-            target_pct = config.target_pct_aggressive  # 20%
-        else:
-            target_pct = config.target_pct_conservative  # 15%
-
-        take_profit = round(price * (1 + target_pct / 100), 2)
-
-        # VALIDACION CRITICA: R:R minimo 3:1
-        rr_ratio = round(target_pct / stop_pct, 2) if stop_pct > 0 else 0
-
-        if rr_ratio < config.min_risk_reward:
-            # R:R insuficiente - rechazar trade
-            return None
-
-        # Position size (10% del capital)
-        position_pct = config.position_size_normal
-        position_value = config.capital * (position_pct / 100)
-        exposure_with_leverage = position_value * config.leverage
-
-        # Calcular perdida/ganancia en EUR
-        max_loss_eur = round(exposure_with_leverage * (stop_pct / 100), 2)
-        potential_gain_eur = round(exposure_with_leverage * (target_pct / 100), 2)
-
-        return {
-            "entry": entry,
-            "stop_loss": stop_loss,
-            "stop_pct": round(stop_pct, 2),
-            "take_profit": take_profit,
-            "target_pct": round(target_pct, 2),
-            "risk_reward": rr_ratio,
-            "position_pct": position_pct,
-            "position_eur": round(position_value, 2),
-            "exposure_eur": round(exposure_with_leverage, 2),
-            "max_loss_eur": max_loss_eur,
-            "potential_gain_eur": potential_gain_eur
-        }
 
 
 # ============================================================================
@@ -716,7 +634,7 @@ class MarketScanner:
 
     def __init__(self):
         self.api = MarketDataAPI()
-        self.scorer = OpportunityScorer(self.api)
+        self.scorer = None  # Se inicializa en scan_market con market_status
         self.earnings_calendar = {}  # Cache de earnings
 
     def _load_earnings_calendar(self):
@@ -759,8 +677,12 @@ class MarketScanner:
         print(f"VIX: {market_status.get('vix', 'N/A')}")
         print(f"S&P 500: {market_status.get('sp500_change', 'N/A')}%")
         print(f"Nasdaq: {market_status.get('nasdaq_change', 'N/A')}%")
+        print(f"SPY sobre 200 EMA: {market_status.get('spy_above_200ema', 'N/A')}")
 
-        # 2. Cargar calendario de earnings (catalizadores)
+        # 2. Inicializar scorer con market status
+        self.scorer = OpportunityScorer(self.api, market_status)
+
+        # 3. Cargar calendario de earnings (catalizadores)
         self._load_earnings_calendar()
 
         # 3. Escanear watchlist
@@ -859,13 +781,13 @@ class MarketScanner:
         return "\n".join(report)
 
     def _format_opportunity(self, opp: dict) -> str:
-        """Formatea una oportunidad individual"""
+        """Formatea una oportunidad individual con reasoning del comité"""
         lines = []
 
         lines.append(f"\n### {opp['symbol']}")
-        lines.append(f"**Score: {opp['total_score']:.0f}/100** | **Senal: {opp['signal']}**")
+        lines.append(f"**Score: {opp['total_score']:.0f}/100** | **Señal: {opp['signal']}**")
 
-        # Metricas basicas
+        # Métricas básicas
         lines.append(f"\nPrecio: ${opp.get('price', 'N/A')}")
         mc = opp.get('market_cap')
         if mc:
@@ -875,27 +797,39 @@ class MarketScanner:
                 lines.append(f"Market Cap: ${mc/1e6:.0f}M")
         lines.append(f"Beta: {opp.get('beta', 'N/A')}")
 
-        # Scores breakdown
-        scores = opp.get("scores", {})
-        lines.append(f"\nScoring:")
-        lines.append(f"  Timing: {scores.get('timing', 0)}/5")
-        lines.append(f"  Tecnico: {scores.get('technical', 0)}/5")
-        lines.append(f"  R:R: {scores.get('risk_reward', 0)}/5")
-        lines.append(f"  Fundamental: {scores.get('fundamental', 0)}/5")
-        lines.append(f"  Catalizador: {scores.get('catalyst', 0)}/5")
+        # Breakdown del Comité
+        breakdown = opp.get("breakdown", {})
+        if breakdown:
+            lines.append(f"\n**Desglose del Comité:**")
+            lines.append(f"  Régimen: {breakdown.get('regime', 0)}/15")
+            lines.append(f"  Turtles (técnico): {breakdown.get('turtles', 0)}/25")
+            lines.append(f"  Seykota (tendencia): {breakdown.get('seykota', 0)}/20")
+            lines.append(f"  Catalizador: {breakdown.get('catalyst', 0)}/25")
+            lines.append(f"  Risk/Reward: {breakdown.get('risk_reward', 0)}/15")
+            if breakdown.get('sector_adjustment', 0) != 0:
+                lines.append(f"  Ajuste sector: {breakdown.get('sector_adjustment', 0):+d}")
+
+        # Reasoning detallado
+        reasoning = opp.get("reasoning", {})
+        if reasoning:
+            lines.append(f"\n**Razonamiento detallado:**")
+
+            for component, reasons in reasoning.items():
+                if reasons:
+                    component_name = component.capitalize()
+                    lines.append(f"\n*{component_name}:*")
+                    for reason in reasons:
+                        lines.append(f"  {reason}")
 
         # Trade setup
         setup = opp.get("trade_setup")
         if setup:
-            lines.append(f"\nTrade Setup:")
-            lines.append(f"  Entry: ${setup['entry']}")
-            lines.append(f"  Stop Loss: ${setup['stop_loss']} (-{setup['stop_pct']}%)")
-            lines.append(f"  Take Profit: ${setup['take_profit']} (+{setup['target_pct']}%)")
-            lines.append(f"  Risk:Reward: 1:{setup['risk_reward']}")
-            lines.append(f"  Position: {setup['position_pct']}% = {setup['position_eur']}EUR")
-            lines.append(f"  Exposicion (x5): {setup['exposure_eur']}EUR")
-            lines.append(f"  Perdida max: {setup['max_loss_eur']}EUR")
-            lines.append(f"  Ganancia potencial: {setup['potential_gain_eur']}EUR")
+            lines.append(f"\n**Trade Setup:**")
+            lines.append(f"  Entry: ${setup.get('entry', 'N/A')}")
+            lines.append(f"  Stop Loss: ${setup.get('stop', 'N/A')} (-{setup.get('stop_pct', 'N/A')}%)")
+            lines.append(f"  Take Profit: ${setup.get('target', 'N/A')} (+{setup.get('target_pct', 'N/A')}%)")
+            lines.append(f"  Risk:Reward: 1:{setup.get('rr_ratio', 'N/A')}")
+            lines.append(f"  Position: €{setup.get('position_eur', 0):.0f}")
 
         return "\n".join(lines)
 
@@ -944,7 +878,8 @@ def create_github_issue_body(scan_result: dict) -> tuple:
 """
         for opp in opps:
             setup = opp.get("trade_setup", {})
-            scores = opp.get("scores", {})
+            breakdown = opp.get("breakdown", {})
+            reasoning = opp.get("reasoning", {})
 
             body += f"""### {opp['symbol']} - Score: {opp['total_score']:.0f}/100
 
@@ -954,24 +889,36 @@ def create_github_issue_body(scan_result: dict) -> tuple:
 | Market Cap | ${opp.get('market_cap', 0)/1e9:.1f}B |
 | Beta | {opp.get('beta', 'N/A')} |
 
-**Scoring Breakdown:**
-| Dimension | Score |
-|-----------|-------|
-| Timing | {scores.get('timing', 0)}/5 |
-| Tecnico | {scores.get('technical', 0)}/5 |
-| Risk/Reward | {scores.get('risk_reward', 0)}/5 |
-| Fundamental | {scores.get('fundamental', 0)}/5 |
-| Catalizador | {scores.get('catalyst', 0)}/5 |
+**Desglose del Comité:**
+| Componente | Score | Max |
+|------------|-------|-----|
+| Régimen | {breakdown.get('regime', 0)} | 15 |
+| Turtles (técnico) | {breakdown.get('turtles', 0)} | 25 |
+| Seykota (tendencia) | {breakdown.get('seykota', 0)} | 20 |
+| Catalizador | {breakdown.get('catalyst', 0)} | 25 |
+| Risk/Reward | {breakdown.get('risk_reward', 0)} | 15 |
+"""
+            if breakdown.get('sector_adjustment', 0) != 0:
+                body += f"| Ajuste sector | {breakdown.get('sector_adjustment', 0):+d} | — |\n"
 
+            body += "\n**Razonamiento:**\n\n"
+
+            # Formatear reasoning por componente
+            for component, reasons in reasoning.items():
+                if reasons:
+                    component_name = component.capitalize()
+                    body += f"**{component_name}:**\n"
+                    for reason in reasons:
+                        body += f"- {reason}\n"
+                    body += "\n"
+
+            body += f"""
 **Trade Setup:**
 - **Entry**: ${setup.get('entry', 'N/A')}
-- **Stop Loss**: ${setup.get('stop_loss', 'N/A')} (-{setup.get('stop_pct', 'N/A')}%)
-- **Take Profit**: ${setup.get('take_profit', 'N/A')} (+{setup.get('target_pct', 'N/A')}%)
-- **Risk:Reward**: 1:{setup.get('risk_reward', 'N/A')}
-- **Position**: {setup.get('position_eur', 0)}EUR ({setup.get('position_pct', 0)}%)
-- **Exposicion (x5)**: {setup.get('exposure_eur', 0)}EUR
-- **Perdida maxima**: {setup.get('max_loss_eur', 0)}EUR
-- **Ganancia potencial**: {setup.get('potential_gain_eur', 0)}EUR
+- **Stop Loss**: ${setup.get('stop', 'N/A')} (-{setup.get('stop_pct', 'N/A')}%)
+- **Take Profit**: ${setup.get('target', 'N/A')} (+{setup.get('target_pct', 'N/A')}%)
+- **Risk:Reward**: 1:{setup.get('rr_ratio', 'N/A')}
+- **Position**: €{setup.get('position_eur', 0):.0f}
 
 ---
 
