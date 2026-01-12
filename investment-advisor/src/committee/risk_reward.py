@@ -60,7 +60,9 @@ def evaluate_risk_reward(
             "signals": {
                 "rr_ratio": 0,
                 "stop_atr_multiple": 0,
-                "suggested_position_eur": 0
+                "suggested_position_eur": 0,
+                "risk_eur": 0,
+                "stop_pct": 0
             },
             "hard_reject": True
         }
@@ -78,7 +80,9 @@ def evaluate_risk_reward(
             "signals": {
                 "rr_ratio": 0,
                 "stop_atr_multiple": 0,
-                "suggested_position_eur": 0
+                "suggested_position_eur": 0,
+                "risk_eur": capital * 0.02,
+                "stop_pct": 0
             },
             "hard_reject": True
         }
