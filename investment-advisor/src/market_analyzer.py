@@ -123,7 +123,7 @@ class MarketDataAPI:
                 "Accept-Language": "en-US,en;q=0.9"
             }
 
-            response = requests.get(url, params=params, headers=headers, timeout=15)
+            response = requests.get(url, params=params, headers=headers, timeout=15, proxies={'http': None, 'https': None})
 
             if response.status_code == 200:
                 data = response.json()
@@ -306,7 +306,7 @@ class MarketDataAPI:
                 "Accept": "application/json"
             }
 
-            response = requests.get(url, params=params, headers=headers, timeout=15)
+            response = requests.get(url, params=params, headers=headers, timeout=15, proxies={'http': None, 'https': None})
             if response.status_code == 200:
                 data = response.json()
                 quote_result = data.get("quoteSummary", {}).get("result")
@@ -407,7 +407,7 @@ class MarketDataAPI:
                     "token": self.finnhub_key
                 }
 
-                response = requests.get(url, params=params, timeout=10)
+                response = requests.get(url, params=params, timeout=10, proxies={'http': None, 'https': None})
                 if response.status_code == 200:
                     data = response.json()
                     earnings = data.get("earningsCalendar", [])
@@ -435,7 +435,7 @@ class MarketDataAPI:
                     "token": self.finnhub_key
                 }
 
-                response = requests.get(url, params=params, timeout=10)
+                response = requests.get(url, params=params, timeout=10, proxies={'http': None, 'https': None})
                 if response.status_code == 200:
                     articles = response.json()
                     sentiment["articles"] = len(articles)
