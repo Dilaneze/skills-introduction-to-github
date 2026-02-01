@@ -73,7 +73,7 @@ jobs:
           fi
 
       - name: Subir reporte como artefacto
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: market-scan-${{ github.run_number }}
           path: investment-advisor/src/scan_output.json
