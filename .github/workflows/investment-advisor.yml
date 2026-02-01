@@ -167,7 +167,7 @@ jobs:
           name: market-scan-${{ github.run_number }}
 
       - name: Enviar email
-        uses: dawidd6/action-send-mail@v3
+        uses: dawidd6/action-send-mail@v8
         with:
           server_address: ${{ secrets.SMTP_SERVER }}
           server_port: ${{ secrets.SMTP_PORT }}
