@@ -67,7 +67,9 @@ Obtén VIX (^VIX) y SPY via Yahoo Finance.
 - Precio > high de 20 días + volumen hoy > 1.5× avg20 = 25 pts
 - Precio dentro del 3% del high20 + volumen creciente = 15-20 pts
 - Precio < EMA20 o volumen plano = 0-8 pts
-Cálculo: usa datos históricos de Yahoo Finance (200d), calcula EMA20, EMA50, EMA200, high20d, avg_volume_20d.
+Cálculo: usa datos históricos (200d velas diarias) para calcular EMA20, EMA50, EMA200, high20d, avg_volume_20d.
+NOTA: si el único catalizador es earnings MAÑANA y Turtles < 18, es un play binario puro
+→ márcalo como ⚠️ BINARY CATALYST y exige score >= 78 en vez de 75.
 
 ## 3. Trend Following / Seykota (0-20 pts)
 - EMA20 > EMA50 > EMA200 (alineación alcista perfecta) = 20 pts
@@ -87,27 +89,50 @@ Calcula entry = precio actual, stop = precio - 2×ATR14, target = entry + 15-20%
 - R:R >= 4:1 = 15 pts
 - R:R 3:1-4:1 = 10-12 pts
 - R:R < 3:1 = HARD REJECT (no importa el score total, descarta)
+⚠️ ATR FIABILIDAD: si no tienes ATR real calculado de velas históricas y usas
+beta-implied, descuenta 4 pts de este componente y anótalo en el Issue como
+"ATR estimado — confirmar stop en apertura antes de entrar".
 
 # OBTENCIÓN DE DATOS DE MERCADO
 
-## Yahoo Finance (no requiere API key)
-URL quote + histórico:
-  https://query1.finance.yahoo.com/v8/finance/chart/{SYMBOL}?interval=1d&range=200d
-User-Agent: Mozilla/5.0 (compatible)
+## CADENA DE FALLBACK (intentar en este orden)
 
-Extrae: price, prev_close, closes[], highs[], lows[], volumes[]
-Calcula: EMA20, EMA50, EMA200, ATR14, high_20d, avg_volume_20d
+### FUENTE 1 — Finnhub (primaria, tienes API key)
+Yahoo Finance bloquea con 403 frecuentemente. Usa Finnhub primero.
 
-## Finnhub (si tienes FINNHUB_API_KEY configurada)
-Earnings calendar (catalizadores):
+Precio y datos básicos:
+  https://finnhub.io/api/v1/quote?symbol={SYMBOL}&token=KEY
+  → price (c), prev_close (pc), change_pct
+
+Velas históricas para indicadores técnicos (solo para candidatos que pasan filtros básicos):
+  https://finnhub.io/api/v1/stock/candle?symbol={SYMBOL}&resolution=D&from={UNIX_200d_ago}&to={UNIX_HOY}&token=KEY
+  → arrays c[] (close), h[] (high), l[] (low), v[] (volume)
+  → Calcula: EMA20, EMA50, EMA200, ATR14, high_20d, avg_volume_20d
+  ⚠️ Rate limit free: 60 req/min. Analiza tiers en orden, para cuando encuentres 2 BUYs.
+
+Earnings calendar:
   https://finnhub.io/api/v1/calendar/earnings?from=HOY&to=HOY+14d&token=KEY
 
-Noticias y sentimiento:
-  https://finnhub.io/api/v1/company-news?symbol=X&from=HOY-7d&to=HOY&token=KEY
+Métricas fundamentales (market cap, beta):
+  https://finnhub.io/api/v1/stock/metric?symbol={SYMBOL}&metric=all&token=KEY
+  → metric.beta, metric.52WeekHigh, metric.52WeekLow
+
+Noticias:
+  https://finnhub.io/api/v1/company-news?symbol={SYMBOL}&from=HOY-7d&to=HOY&token=KEY
+
+### FUENTE 2 — Yahoo Finance (fallback si Finnhub falla)
+  https://query1.finance.yahoo.com/v8/finance/chart/{SYMBOL}?interval=1d&range=200d
+  User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+  Proxies: none
+
+### FUENTE 3 — WebSearch (último recurso)
+Usa WebSearch para obtener precio actual y contexto si las APIs fallan.
+Si llegas aquí: marca todos los ATR como "estimados" y aplica penalización de -4 pts en R:R.
 
 ## VIX y Mercado general
-- VIX: símbolo ^VIX en Yahoo Finance
+- VIX: ^VIX vía Finnhub quote o Yahoo Finance
 - S&P500: SPY | Nasdaq: QQQ
+- Si todo falla: busca "VIX today" y "SPY price" vía WebSearch
 
 # DECISIÓN FINAL
 - Score >= 75 (82 en RISK-OFF) → COMPRA → crear GitHub Issue
