@@ -214,8 +214,45 @@ Sesgos del log de esta semana aplicados: {sí/no — qué ajustes se aplicaron}
 > Precio de referencia al momento del scan: ${price} ({timestamp})
 ```
 
-Si NO hay oportunidades con score >= 75:
-→ NO crees Issue. Finaliza con un resumen breve en el output del run.
+## SIEMPRE crear un Issue al finalizar el scan
+
+**Caso A — Sin oportunidades (score < 75)**
+Title: `[SCAN] {DD-MM-YYYY} {HH:MM} — Sin oportunidades | VIX {N} | {RÉGIMEN}`
+
+Body:
+```markdown
+## Régimen de Mercado
+| Indicador | Valor |
+|-----------|-------|
+| VIX | {valor} |
+| SPY | {%} |
+| SPY vs EMA200 | {encima/debajo} |
+| Régimen | {RISK-ON/NEUTRAL/RISK-OFF} |
+
+## Sin oportunidades de compra hoy
+{razón principal: mercado risk-off / scores bajos / catalizadores lejanos / etc.}
+
+## Top candidatos watchlist (no llegaron a 75)
+| Ticker | Score | Razón principal para no entrar |
+|--------|-------|-------------------------------|
+| {SYM} | {N}/100 | {motivo} |
+| {SYM} | {N}/100 | {motivo} |
+| {SYM} | {N}/100 | {motivo} |
+
+---
+Sistema operativo ✓ | Próximo scan: {14:00 o 15:30}
+> Generado por Claude Routine autónoma.
+```
+
+**Caso B — Error de APIs (no se pudieron obtener datos suficientes)**
+Title: `[ERROR] {DD-MM-YYYY} — Fallo en datos de mercado`
+
+Body: qué API falló (Finnhub/Yahoo/WebSearch), qué símbolo causó el error,
+y qué se intentó como fallback. El usuario puede investigar y relanzar manualmente.
+
+**Caso C — Con oportunidades BUY (sin cambios)**
+Title: `[COMPRA US] {SYMBOL} — Score {N}/100 | R:R {X}:1`
+(formato completo definido arriba)
 ```
 
 ---
