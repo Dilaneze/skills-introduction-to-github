@@ -2,11 +2,13 @@
 CATALYST-DRIVEN SWING TRADING ANALYZER
 Asesor automatizado para mercados US y EU
 
-Versión 2.0 - Sistema de Comité Virtual con scoring trazable
+Versión 3.0 - Sistema de Comité Virtual bidireccional (Long + Short)
 """
 
 import os
 import json
+import time
+import random
 import requests
 from datetime import datetime, timedelta
 from dataclasses import dataclass
@@ -58,7 +60,48 @@ class TradingConfig:
             "large": 500_000      # >$10B: 500K shares
         }
 
-config = TradingConfig()
+def load_trading_config() -> TradingConfig:
+    """Carga parámetros desde trading_config.json; fallback a defaults si no existe."""
+    config_path = os.path.join(os.path.dirname(__file__), "..", "config", "trading_config.json")
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+        risk = data.get("risk_parameters", {})
+        filters = data.get("filters", {})
+        vol = filters.get("volume_thresholds", {})
+        cfg = TradingConfig(
+            capital=float(data.get("capital", 500)),
+            leverage=int(data.get("leverage", 5)),
+            max_stop_loss_pct=float(risk.get("max_stop_loss_pct", 10.0)),
+            min_risk_reward=float(risk.get("min_risk_reward", 3.0)),
+            position_size_normal=float(risk.get("position_size_normal_pct", 10.0)),
+            position_size_exceptional=float(risk.get("position_size_exceptional_pct", 15.0)),
+            max_concurrent_positions=int(risk.get("max_concurrent_positions", 2)),
+            min_holding_days=int(risk.get("min_holding_days", 1)),
+            max_holding_days=int(risk.get("max_holding_days", 14)),
+            min_market_cap=float(filters.get("min_market_cap_usd", 100_000_000)),
+            max_market_cap=float(filters.get("max_market_cap_usd", 100_000_000_000)),
+            min_beta=float(filters.get("min_beta", 1.5)),
+            preferred_beta=float(filters.get("preferred_beta", 2.0)),
+            min_price=float(filters.get("min_price_usd", 2.0)),
+            max_price=float(filters.get("max_price_usd", 500.0)),
+            max_spread_pct=float(filters.get("max_spread_pct", 1.0)),
+        )
+        if vol:
+            cfg.volume_thresholds = {
+                "small": int(vol.get("small_cap_300M_1B", 1_000_000)),
+                "mid": int(vol.get("mid_cap_1B_5B", 750_000)),
+                "large": int(vol.get("large_cap_above_5B", 500_000)),
+            }
+        print(f"[CONFIG] Cargado trading_config.json — stop_loss={cfg.max_stop_loss_pct}%, "
+              f"min_price=${cfg.min_price}, min_cap=${cfg.min_market_cap/1e6:.0f}M")
+        return cfg
+    except FileNotFoundError:
+        print("[CONFIG] trading_config.json no encontrado, usando defaults")
+        return TradingConfig()
+
+
+config = load_trading_config()
 
 # ============================================================================
 # APIs DE DATOS (Gratuitas)
@@ -118,73 +161,82 @@ class MarketDataAPI:
 
     def _fetch_yahoo_quote(self, symbol: str) -> Optional[dict]:
         """Fetch quote from Yahoo Finance with historical data for technical indicators"""
-        try:
-            # Obtener datos históricos de 200 días para calcular EMAs y ATR
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-            params = {"interval": "1d", "range": "200d"}
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "application/json",
-                "Accept-Language": "en-US,en;q=0.9"
-            }
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        params = {"interval": "1d", "range": "200d"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9"
+        }
 
-            response = requests.get(url, params=params, headers=headers, timeout=15, proxies={'http': None, 'https': None})
+        for attempt in range(3):
+            try:
+                response = requests.get(url, params=params, headers=headers, timeout=15, proxies={'http': None, 'https': None})
 
-            if response.status_code == 200:
-                data = response.json()
-                chart_result = data.get("chart", {}).get("result")
+                if response.status_code == 200:
+                    data = response.json()
+                    chart_result = data.get("chart", {}).get("result")
 
-                if not chart_result or len(chart_result) == 0:
-                    print(f"[WARN] No data for {symbol}")
+                    if not chart_result or len(chart_result) == 0:
+                        print(f"[WARN] No data for {symbol}")
+                        return None
+
+                    result = chart_result[0]
+                    meta = result.get("meta", {})
+                    indicators = result.get("indicators", {}).get("quote", [{}])[0]
+
+                    price = meta.get("regularMarketPrice", 0)
+                    prev_close = meta.get("previousClose", 0) or meta.get("chartPreviousClose", 0)
+
+                    # Calcular cambio porcentual
+                    if prev_close and prev_close > 0:
+                        change_pct = ((price - prev_close) / prev_close * 100)
+                    else:
+                        change_pct = 0
+
+                    # Extraer precios de cierre históricos
+                    closes = indicators.get("close", [])
+                    highs = indicators.get("high", [])
+                    lows = indicators.get("low", [])
+                    volumes = indicators.get("volume", [])
+
+                    # Filtrar None values
+                    closes = [c for c in closes if c is not None]
+                    highs = [h for h in highs if h is not None]
+                    lows = [l for l in lows if l is not None]
+                    volumes = [v for v in volumes if v is not None]
+
+                    # Calcular indicadores técnicos
+                    technical_indicators = self._calculate_technical_indicators(closes, highs, lows, volumes)
+
+                    quote = {
+                        "symbol": symbol,
+                        "price": round(price, 2) if price else 0,
+                        "prev_close": round(prev_close, 2) if prev_close else 0,
+                        "change_pct": round(change_pct, 2),
+                        "_closes_raw": closes  # Para cálculos de RS vs SPY
+                    }
+
+                    # Agregar indicadores técnicos
+                    quote.update(technical_indicators)
+                    return quote
+
+                elif response.status_code == 429:
+                    wait = 2 ** (attempt + 1)
+                    print(f"[WARN] Rate limited on {symbol}, waiting {wait}s (attempt {attempt+1}/3)")
+                    time.sleep(wait)
+                else:
+                    print(f"[WARN] Yahoo API returned {response.status_code} for {symbol}")
                     return None
 
-                result = chart_result[0]
-                meta = result.get("meta", {})
-                indicators = result.get("indicators", {}).get("quote", [{}])[0]
-
-                price = meta.get("regularMarketPrice", 0)
-                prev_close = meta.get("previousClose", 0) or meta.get("chartPreviousClose", 0)
-
-                # Calcular cambio porcentual
-                if prev_close and prev_close > 0:
-                    change_pct = ((price - prev_close) / prev_close * 100)
-                else:
-                    change_pct = 0
-
-                # Extraer precios de cierre históricos
-                closes = indicators.get("close", [])
-                highs = indicators.get("high", [])
-                lows = indicators.get("low", [])
-                volumes = indicators.get("volume", [])
-
-                # Filtrar None values
-                closes = [c for c in closes if c is not None]
-                highs = [h for h in highs if h is not None]
-                lows = [l for l in lows if l is not None]
-                volumes = [v for v in volumes if v is not None]
-
-                # Calcular indicadores técnicos
-                technical_indicators = self._calculate_technical_indicators(closes, highs, lows, volumes)
-
-                quote = {
-                    "symbol": symbol,
-                    "price": round(price, 2) if price else 0,
-                    "prev_close": round(prev_close, 2) if prev_close else 0,
-                    "change_pct": round(change_pct, 2),
-                    "_closes_raw": closes  # Para cálculos de RS vs SPY
-                }
-
-                # Agregar indicadores técnicos
-                quote.update(technical_indicators)
-
-                return quote
-            else:
-                print(f"[WARN] Yahoo API returned {response.status_code} for {symbol}")
-
-        except requests.exceptions.Timeout:
-            print(f"[WARN] Timeout fetching {symbol}")
-        except Exception as e:
-            print(f"[ERROR] Fetching {symbol}: {e}")
+            except requests.exceptions.Timeout:
+                wait = 2 ** attempt
+                print(f"[WARN] Timeout fetching {symbol} (attempt {attempt+1}/3), retrying in {wait}s")
+                if attempt < 2:
+                    time.sleep(wait)
+            except Exception as e:
+                print(f"[ERROR] Fetching {symbol}: {e}")
+                return None
 
         return None
 
@@ -859,6 +911,7 @@ class MarketScanner:
         print_lock = threading.Lock()
 
         def scan_symbol(symbol: str) -> dict:
+            time.sleep(random.uniform(0.3, 0.7))  # Distribuir requests para evitar rate limiting
             catalyst_info = self.earnings_calendar.get(symbol)
             # Cargar datos una sola vez y reutilizarlos para long y short
             stock_data = self.api.get_stock_data(symbol, market_status)
