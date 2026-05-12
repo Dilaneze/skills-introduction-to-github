@@ -14,6 +14,34 @@ Puntuación: 0-20 puntos distribuidos en:
 from typing import Dict
 
 
+def compute_weinstein_stage(ticker_data: Dict) -> int:
+    """
+    Clasifica el stock en Weinstein Stage 1-4 usando SMA 150 (30-week).
+
+    Stage 1: Basing  — precio < SMA150, SMA150 plana/subiendo levemente
+    Stage 2: Advancing — precio > SMA150, SMA150 subiendo  ← LONG
+    Stage 3: Topping — precio > SMA150, SMA150 aplanando
+    Stage 4: Declining — precio < SMA150, SMA150 declinando ← SHORT
+
+    Referencia: Stan Weinstein "Secrets for Profiting in Bull and Bear Markets" (1988)
+    """
+    price = ticker_data.get("price", 0)
+    sma_150 = ticker_data.get("sma_150", 0)
+    sma_150_20d_ago = ticker_data.get("sma_150_20d_ago", sma_150)
+
+    if price <= 0 or sma_150 <= 0:
+        return 0  # Unknown — sin suficiente historia
+
+    price_above = price > sma_150
+    # SMA se considera rising si subió >0.1% en 20 días (filtro de ruido)
+    sma_rising = sma_150 > sma_150_20d_ago * 1.001 if sma_150_20d_ago > 0 else True
+
+    if price_above:
+        return 2 if sma_rising else 3
+    else:
+        return 4 if not sma_rising else 1
+
+
 def evaluate_seykota(ticker_data: Dict) -> Dict:
     """
     Evalúa alineación con tendencia (trend following).

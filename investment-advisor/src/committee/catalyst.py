@@ -63,17 +63,22 @@ def evaluate_catalyst(ticker_data: Dict, catalyst_info: Optional[Dict]) -> Dict:
     score = 0
     reasoning = []
 
-    # Si no hay catalizador, dar puntos base neutros
+    # Verificar señales adicionales independientes del catalizador
+    extra_signals = _check_extra_signals(ticker_data)
+
+    # Si no hay catalizador, usar score neutro + señales extra
     if not catalyst_info:
+        base_score = 14 + extra_signals["score"]
         return {
             "style": "catalyst",
-            "score": 12,  # Score neutro (casi la mitad)
+            "score": min(base_score, 25),
             "max_score": 25,
-            "reasoning": ["~ Sin catalizador identificado — scoring basado en setup técnico"],
+            "reasoning": ["~ Sin catalizador identificado — scoring técnico puro"] + extra_signals["reasoning"],
             "signals": {
                 "catalyst_type": "none",
                 "days_to_event": 999,
-                "historical_avg_move": 0
+                "historical_avg_move": 0,
+                **extra_signals["signals"]
             }
         }
 
@@ -144,15 +149,67 @@ def evaluate_catalyst(ticker_data: Dict, catalyst_info: Optional[Dict]) -> Dict:
         score += 3
         reasoning.append(f"~ Expectativas desconocidas (asumiendo neutral)")
 
+    score += extra_signals["score"]
+    reasoning += extra_signals["reasoning"]
+
     return {
         "style": "catalyst",
-        "score": score,
+        "score": min(score, 25),
         "max_score": 25,
         "reasoning": reasoning,
         "signals": {
             "catalyst_type": catalyst_type,
             "days_to_event": days_to_event,
             "historical_avg_move": historical_reaction,
-            "expectations": expectations
+            "expectations": expectations,
+            **extra_signals["signals"]
         }
     }
+
+
+def _check_extra_signals(ticker_data: dict) -> dict:
+    """
+    Señales adicionales independientes del catalizador principal:
+    1. PEAD Long: EPS beat reciente → el precio continúa subiendo (drift)
+    2. Short Squeeze: alto short interest + catalizador = potencial explosivo
+
+    Puntuación extra: hasta +4 pts sobre el score base de catalyst.
+    """
+    score = 0
+    reasoning = []
+    signals = {}
+
+    # PEAD Long: si hubo earnings beat reciente (vía Finnhub)
+    eps_surprise_pct = ticker_data.get("eps_surprise_pct")
+    days_since_earnings = ticker_data.get("days_since_earnings")
+
+    if eps_surprise_pct is not None and eps_surprise_pct > 10 and days_since_earnings is not None:
+        if days_since_earnings <= 5:
+            score += 4
+            reasoning.append(f"✓✓ PEAD Long: EPS beat +{eps_surprise_pct:.1f}% hace {days_since_earnings}d (drift alcista activo)")
+        elif days_since_earnings <= 15:
+            score += 2
+            reasoning.append(f"✓ PEAD Long: EPS beat +{eps_surprise_pct:.1f}% hace {days_since_earnings}d")
+        signals["pead_long_active"] = True
+        signals["eps_beat_pct"] = eps_surprise_pct
+    else:
+        signals["pead_long_active"] = False
+
+    # Short Squeeze: alto short interest + momentum = potencial explosivo
+    short_pct = ticker_data.get("short_pct")  # % del float en corto
+    short_ratio = ticker_data.get("short_ratio")  # días para cubrir
+
+    if short_pct is not None and short_pct > 0.15:  # >15% del float en corto
+        days_to_cover = short_ratio or 0
+        if days_to_cover >= 3:
+            score += 3
+            reasoning.append(f"✓✓ Short Squeeze setup: {short_pct*100:.0f}% float short, {days_to_cover:.1f}d to cover")
+        elif short_pct > 0.20:
+            score += 2
+            reasoning.append(f"✓ Alto short interest: {short_pct*100:.0f}% del float — potencial squeeze")
+        signals["squeeze_potential"] = True
+        signals["short_float_pct"] = short_pct
+    else:
+        signals["squeeze_potential"] = False
+
+    return {"score": score, "reasoning": reasoning, "signals": signals}

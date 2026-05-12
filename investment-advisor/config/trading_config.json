@@ -30,8 +30,8 @@
   },
 
   "scoring": {
-    "min_score_for_buy": 75,
-    "min_score_for_watchlist": 60,
+    "min_score_for_buy": 70,
+    "min_score_for_watchlist": 58,
     "system": "virtual_committee",
     "version": "2.0",
     "committee_breakdown": {
@@ -41,6 +41,21 @@
       "catalyst": {"max": 25, "description": "Catalyst-driven timing"},
       "risk_reward": {"max": 15, "description": "Simons - Validación estadística"}
     }
+  },
+
+  "short_parameters": {
+    "min_score_for_short": 55,
+    "min_score_for_watchlist_short": 40,
+    "max_hold_days": 5,
+    "risk_pct_of_capital": 1.5,
+    "overnight_fee_daily_pct": 0.0226,
+    "min_move_for_profitability_pct": 3.0,
+    "strategies": {
+      "parabolic_short": {"max_score": 30, "description": "Qullamaggie - Climax run reversal"},
+      "stage4_rejection": {"max_score": 30, "description": "Weinstein Stage 4 - SMA150 rejection"},
+      "pead_miss": {"max_score": 25, "description": "Post-earnings drift negativo"}
+    },
+    "notes": "Shorts solo cuando score >= 55. Fee diario ~0.0226% del valor. Min movimiento ~3% para cubrir costes en 5 dias."
   },
 
   "etoro_costs": {
