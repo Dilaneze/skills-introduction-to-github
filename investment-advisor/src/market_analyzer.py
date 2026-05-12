@@ -15,8 +15,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-# Importar el comité virtual
-from committee import evaluate_opportunity
+# Importar el comité virtual (longs y shorts)
+from committee import evaluate_opportunity, evaluate_short_opportunity
 
 # ============================================================================
 # CONFIGURACION
@@ -99,6 +99,9 @@ class MarketDataAPI:
                 spy_ema_200 = spy_data.get("ema_200", 0)
                 if spy_price > 0 and spy_ema_200 > 0:
                     result["spy_above_200ema"] = spy_price > spy_ema_200
+                # SPY precio hace 60 días para cálculo de RS relativa
+                result["spy_price"] = spy_price
+                result["spy_price_60d_ago"] = spy_data.get("price_60d_ago", spy_price)
 
             # Nasdaq
             nasdaq_data = self._fetch_yahoo_quote("^IXIC")
@@ -167,7 +170,8 @@ class MarketDataAPI:
                     "symbol": symbol,
                     "price": round(price, 2) if price else 0,
                     "prev_close": round(prev_close, 2) if prev_close else 0,
-                    "change_pct": round(change_pct, 2)
+                    "change_pct": round(change_pct, 2),
+                    "_closes_raw": closes  # Para cálculos de RS vs SPY
                 }
 
                 # Agregar indicadores técnicos
@@ -189,16 +193,21 @@ class MarketDataAPI:
         if not closes or len(closes) < 20:
             return {}
 
-        current_price = closes[-1]
         indicators = {}
 
         # High de 20 días
         if len(highs) >= 20:
             indicators["high_20d"] = max(highs[-20:])
 
-        # Precio de hace 10 días
+        # Precios históricos para momentum y parabolic detection
+        if len(closes) >= 6:
+            indicators["price_5d_ago"] = closes[-6]
         if len(closes) >= 11:
             indicators["price_10d_ago"] = closes[-11]
+        if len(closes) >= 21:
+            indicators["price_20d_ago"] = closes[-21]
+        if len(closes) >= 61:
+            indicators["price_60d_ago"] = closes[-61]
 
         # Volumen promedio de 20 días
         if len(volumes) >= 20:
@@ -217,11 +226,43 @@ class MarketDataAPI:
         if len(closes) >= 200:
             indicators["ema_200"] = self._calculate_ema(closes, 200)
 
+        # SMA 150 (Weinstein 30-week MA) — distingue Stage 2 de Stage 4
+        if len(closes) >= 150:
+            indicators["sma_150"] = self._calculate_sma(closes, 150)
+            # SMA 150 de hace 20 días para detectar dirección (rising/declining)
+            if len(closes) >= 170:
+                indicators["sma_150_20d_ago"] = self._calculate_sma(closes[:-20], 150)
+
         # ATR 14
         if len(closes) >= 14 and len(highs) >= 14 and len(lows) >= 14:
             indicators["atr_14"] = self._calculate_atr(closes, highs, lows, 14)
 
+        # RSI 14 — para detección parabólica (RSI > 80 = overbought extremo)
+        if len(closes) >= 15:
+            indicators["rsi_14"] = self._calculate_rsi(closes, 14)
+
         return indicators
+
+    def _calculate_sma(self, prices: list, period: int) -> float:
+        """Calcula SMA (Simple Moving Average)"""
+        if len(prices) < period:
+            return 0
+        return round(sum(prices[-period:]) / period, 2)
+
+    def _calculate_rsi(self, closes: list, period: int = 14) -> float:
+        """Calcula RSI (Relative Strength Index)"""
+        if len(closes) < period + 1:
+            return 50.0
+        deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+        recent = deltas[-(period + 1):]
+        gains = [max(d, 0) for d in recent]
+        losses = [max(-d, 0) for d in recent]
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return round(100 - (100 / (1 + rs)), 2)
 
     def _calculate_ema(self, prices: list, period: int) -> float:
         """Calcula EMA (Exponential Moving Average)"""
@@ -283,18 +324,31 @@ class MarketDataAPI:
         else:
             return "CAUTELA (Volatilidad moderada-alta)"
 
-    def get_stock_data(self, symbol: str) -> Optional[dict]:
+    def get_stock_data(self, symbol: str, market_status: dict = None) -> Optional[dict]:
         """Obtiene datos completos de una accion"""
         quote = self._fetch_yahoo_quote(symbol)
         if not quote:
             return None
 
-        # Intentar obtener datos adicionales de Yahoo
+        # Limpiar campo interno de datos raw (solo para cálculos internos)
+        quote.pop("_closes_raw", None)
+
+        # Obtener datos adicionales de Yahoo
         yahoo_data_ok = self._fetch_yahoo_details(quote, symbol)
 
         # Si Yahoo fallo y tenemos Finnhub, usar como fallback
         if not yahoo_data_ok and self.finnhub_key:
             self._fetch_finnhub_details(quote, symbol)
+
+        # Earnings surprise para PEAD (si tenemos Finnhub key)
+        if self.finnhub_key:
+            earnings_data = self.get_earnings_surprise(symbol)
+            quote.update(earnings_data)
+
+        # Propagar datos del mercado para RS vs SPY (turtles Minervini)
+        if market_status:
+            quote["spy_price_60d_ago"] = market_status.get("spy_price_60d_ago", 0)
+            quote["spy_price"] = market_status.get("spy_price", 0)
 
         return quote
 
@@ -391,6 +445,61 @@ class MarketDataAPI:
 
         return False
 
+    def get_earnings_surprise(self, symbol: str) -> dict:
+        """
+        Obtiene el earnings surprise del último trimestre para PEAD scoring.
+        Requiere Finnhub API key.
+
+        Returns dict con: eps_surprise_pct, earnings_reaction_pct, days_since_earnings,
+        earnings_day_volume_ratio
+        """
+        result = {
+            "eps_surprise_pct": None,
+            "earnings_reaction_pct": None,
+            "days_since_earnings": None,
+            "earnings_day_volume_ratio": None
+        }
+
+        if not self.finnhub_key:
+            return result
+
+        try:
+            url = "https://finnhub.io/api/v1/stock/earnings"
+            params = {"symbol": symbol, "limit": 4, "token": self.finnhub_key}
+            response = requests.get(url, params=params, timeout=10, proxies={"http": None, "https": None})
+
+            if response.status_code != 200:
+                return result
+
+            data = response.json()
+            if not data:
+                return result
+
+            # Usar el último trimestre reportado
+            latest = data[0]
+            actual = latest.get("actual")
+            estimate = latest.get("estimate")
+            period = latest.get("period", "")  # "YYYY-MM-DD"
+
+            if actual is None or estimate is None or estimate == 0:
+                return result
+
+            # EPS surprise %: positivo = beat, negativo = miss
+            result["eps_surprise_pct"] = round((actual - estimate) / abs(estimate) * 100, 1)
+
+            # Días desde earnings
+            if period:
+                try:
+                    earnings_date = datetime.strptime(period, "%Y-%m-%d")
+                    result["days_since_earnings"] = max(0, (datetime.now() - earnings_date).days)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            print(f"[WARN] Finnhub earnings surprise failed for {symbol}: {e}")
+
+        return result
+
     def get_earnings_calendar(self, days_ahead: int = 7) -> list:
         """Obtiene calendario de earnings proximos"""
         earnings = []
@@ -453,16 +562,17 @@ class MarketDataAPI:
 # ============================================================================
 
 class OpportunityScorer:
-    """Sistema de puntuación de oportunidades usando el Comité Virtual"""
+    """Sistema de puntuación de oportunidades de LONG usando el Comité Virtual"""
 
     def __init__(self, api: MarketDataAPI, market_status: dict):
         self.api = api
         self.market_status = market_status
 
-    def score_opportunity(self, symbol: str, catalyst_info: dict = None) -> dict:
-        """Evalúa y puntúa una oportunidad de trading usando el comité"""
+    def score_opportunity(self, symbol: str, catalyst_info: dict = None, stock_data: dict = None) -> dict:
+        """Evalúa y puntúa una oportunidad de LONG usando el comité"""
 
-        stock_data = self.api.get_stock_data(symbol)
+        if stock_data is None:
+            stock_data = self.api.get_stock_data(symbol, self.market_status)
         if not stock_data:
             return {"symbol": symbol, "score": 0, "error": "No se pudo obtener datos"}
 
@@ -509,7 +619,7 @@ class OpportunityScorer:
         }
 
 
-    def _check_exclusions(self, stock_data: dict) -> Optional[str]:
+    def _check_exclusions(self, stock_data: dict, direction: str = "LONG") -> Optional[str]:
         """Verifica criterios de exclusion"""
         price = stock_data.get("price", 0)
         market_cap = stock_data.get("market_cap", 0)
@@ -544,6 +654,58 @@ class OpportunityScorer:
                     return f"Volumen insuficiente para large cap"
 
         return None
+
+
+class ShortOpportunityScorer:
+    """Sistema de puntuación de oportunidades de SHORT usando el Comité de Cortos"""
+
+    def __init__(self, api: MarketDataAPI, market_status: dict):
+        self.api = api
+        self.market_status = market_status
+
+    def score_short_opportunity(self, symbol: str, stock_data: dict, catalyst_info: dict = None) -> dict:
+        """
+        Evalúa una oportunidad de SHORT usando el comité de cortos.
+        Recibe stock_data ya cargado (compartido con el scorer de longs).
+        """
+        if not stock_data:
+            return {"symbol": symbol, "score": 0, "error": "Sin datos"}
+
+        # Filtros básicos para shorts: no shortear micro caps ilíquidas
+        price = stock_data.get("price", 0)
+        market_cap = stock_data.get("market_cap", 0)
+        avg_volume = stock_data.get("avg_volume", stock_data.get("avg_volume_20d", 0))
+
+        if price and price < 3:
+            return {"symbol": symbol, "total_score": 0, "signal": "SKIP_SHORT",
+                    "exclusion_reason": f"Precio muy bajo para short (${price})"}
+
+        if market_cap and market_cap < 50_000_000:
+            return {"symbol": symbol, "total_score": 0, "signal": "SKIP_SHORT",
+                    "exclusion_reason": "Market cap demasiado bajo para short seguro"}
+
+        evaluation = evaluate_short_opportunity(
+            ticker=symbol,
+            ticker_data=stock_data,
+            market_data=self.market_status,
+            catalyst_info=catalyst_info,
+            capital=config.capital,
+            leverage=config.leverage
+        )
+
+        return {
+            "symbol": symbol,
+            "price": stock_data.get("price"),
+            "market_cap": stock_data.get("market_cap"),
+            "beta": stock_data.get("beta"),
+            "total_score": evaluation["final_score"],
+            "signal": evaluation["decision"],
+            "exclusion_reason": None if evaluation["decision"] in ["SHORT", "WATCHLIST_SHORT"] else evaluation["decision_reason"],
+            "trade_setup": evaluation["trade_params"] if evaluation["decision"] == "SHORT" else None,
+            "committee_evaluation": evaluation,
+            "breakdown": evaluation["breakdown"],
+            "reasoning": evaluation["reasoning"]
+        }
 
 
 # ============================================================================
@@ -681,24 +843,37 @@ class MarketScanner:
         print(f"Nasdaq: {market_status.get('nasdaq_change', 'N/A')}%")
         print(f"SPY sobre 200 EMA: {market_status.get('spy_above_200ema', 'N/A')}")
 
-        # 2. Inicializar scorer con market status
+        # 2. Inicializar scorers con market status (long y short)
         self.scorer = OpportunityScorer(self.api, market_status)
+        self.short_scorer = ShortOpportunityScorer(self.api, market_status)
 
         # 3. Cargar calendario de earnings (catalizadores)
         self._load_earnings_calendar()
 
-        # 3. Escanear watchlist en paralelo
+        # 3. Escanear watchlist en paralelo (LONG + SHORT simultáneamente)
         opportunities = []
         watchlist_items = []
         skipped = []
+        short_opportunities = []
+        short_watchlist = []
         print_lock = threading.Lock()
 
         def scan_symbol(symbol: str) -> dict:
             catalyst_info = self.earnings_calendar.get(symbol)
-            result = self.scorer.score_opportunity(symbol, catalyst_info)
-            return {"symbol": symbol, "catalyst_info": catalyst_info, "result": result}
+            # Cargar datos una sola vez y reutilizarlos para long y short
+            stock_data = self.api.get_stock_data(symbol, market_status)
+            result_long = self.scorer.score_opportunity(symbol, catalyst_info, stock_data) if stock_data else \
+                {"symbol": symbol, "total_score": 0, "signal": "SKIP", "error": "Sin datos"}
+            result_short = self.short_scorer.score_short_opportunity(symbol, stock_data, catalyst_info) \
+                if stock_data else {"symbol": symbol, "total_score": 0, "signal": "SKIP_SHORT"}
+            return {
+                "symbol": symbol,
+                "catalyst_info": catalyst_info,
+                "long": result_long,
+                "short": result_short
+            }
 
-        # 5 workers: balance entre velocidad y rate limiting de Yahoo Finance
+        # 5 workers: balance velocidad / rate limiting Yahoo Finance + Finnhub
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {executor.submit(scan_symbol, sym): sym for sym in watchlist}
             completed = 0
@@ -708,26 +883,35 @@ class MarketScanner:
                     item = future.result()
                     symbol = item["symbol"]
                     catalyst_info = item["catalyst_info"]
-                    result = item["result"]
+                    result = item["long"]
+                    result_short = item["short"]
 
-                    if result.get("error"):
+                    # Procesar LONG
+                    if not result.get("error"):
+                        score = result.get("total_score", 0)
+                        signal = result.get("signal", "SKIP")
+                        catalyst_tag = f"[EARNINGS {catalyst_info['days_ahead']}d] " if catalyst_info else ""
+                        short_score = result_short.get("total_score", 0)
+                        short_signal = result_short.get("signal", "SKIP_SHORT")
+                        short_tag = f"| SHORT:{short_score:.0f}" if short_score >= 40 else ""
+
                         with print_lock:
-                            print(f"  {symbol}: ERROR: {result['error']}")
-                        continue
+                            print(f"  [{completed}/{len(watchlist)}] {symbol} {catalyst_tag}"
+                                  f"L:{score:.0f}({signal}) {short_tag}")
 
-                    score = result.get("total_score", 0)
-                    signal = result.get("signal", "SKIP")
-                    catalyst_tag = f"[EARNINGS en {catalyst_info['days_ahead']}d] " if catalyst_info else ""
+                        if signal == "COMPRA":
+                            opportunities.append(result)
+                        elif signal == "WATCHLIST":
+                            watchlist_items.append(result)
+                        else:
+                            skipped.append(result)
 
-                    with print_lock:
-                        print(f"  [{completed}/{len(watchlist)}] {symbol} {catalyst_tag}Score: {score:.0f} - {signal}")
-
-                    if signal == "COMPRA":
-                        opportunities.append(result)
-                    elif signal == "WATCHLIST":
-                        watchlist_items.append(result)
-                    else:
-                        skipped.append(result)
+                    # Procesar SHORT
+                    short_sig = result_short.get("signal", "SKIP_SHORT")
+                    if short_sig == "SHORT":
+                        short_opportunities.append(result_short)
+                    elif short_sig == "WATCHLIST_SHORT":
+                        short_watchlist.append(result_short)
 
                 except Exception as e:
                     sym = futures[future]
@@ -737,15 +921,21 @@ class MarketScanner:
         # Ordenar por score
         opportunities.sort(key=lambda x: x["total_score"], reverse=True)
         watchlist_items.sort(key=lambda x: x["total_score"], reverse=True)
+        short_opportunities.sort(key=lambda x: x["total_score"], reverse=True)
+        short_watchlist.sort(key=lambda x: x["total_score"], reverse=True)
 
         return {
             "timestamp": datetime.now().isoformat(),
             "market_status": market_status,
-            "opportunities": opportunities[:5],  # Top 5
-            "watchlist": watchlist_items[:10],   # Top 10 watchlist
+            "opportunities": opportunities[:5],
+            "watchlist": watchlist_items[:10],
+            "short_opportunities": short_opportunities[:5],
+            "short_watchlist": short_watchlist[:10],
             "total_scanned": len(watchlist),
             "opportunities_found": len(opportunities),
             "watchlist_count": len(watchlist_items),
+            "short_opportunities_found": len(short_opportunities),
+            "short_watchlist_count": len(short_watchlist),
             "earnings_detected": len(self.earnings_calendar)
         }
 
@@ -786,17 +976,71 @@ class MarketScanner:
             for item in watch[:5]:
                 report.append(f"- {item['symbol']}: Score {item['total_score']:.0f} | ${item.get('price', 'N/A')}")
 
+        # Oportunidades de SHORT
+        shorts = scan_result.get("short_opportunities", [])
+        if shorts:
+            report.append(f"\n## OPORTUNIDADES EN CORTO ({len(shorts)})")
+            report.append("-" * 40)
+            for s in shorts:
+                report.append(self._format_short_opportunity(s))
+
+        short_watch = scan_result.get("short_watchlist", [])
+        if short_watch:
+            report.append(f"\n## WATCHLIST CORTOS ({len(short_watch)})")
+            report.append("-" * 40)
+            for item in short_watch[:5]:
+                report.append(f"- {item['symbol']}: Score {item['total_score']:.0f} | ${item.get('price', 'N/A')}")
+
         # Resumen
         report.append(f"\n## RESUMEN")
         report.append(f"Acciones analizadas: {scan_result['total_scanned']}")
-        report.append(f"Oportunidades encontradas: {scan_result['opportunities_found']}")
-        report.append(f"En watchlist: {scan_result['watchlist_count']}")
+        report.append(f"Oportunidades LONG: {scan_result['opportunities_found']}")
+        report.append(f"Oportunidades SHORT: {scan_result.get('short_opportunities_found', 0)}")
+        report.append(f"En watchlist long: {scan_result['watchlist_count']}")
+        report.append(f"En watchlist short: {scan_result.get('short_watchlist_count', 0)}")
 
         report.append("\n" + "=" * 60)
         report.append("DISCLAIMER: Esto NO es consejo financiero. Opera bajo tu propio riesgo.")
         report.append("=" * 60)
 
         return "\n".join(report)
+
+    def _format_short_opportunity(self, opp: dict) -> str:
+        """Formatea una oportunidad de short individual"""
+        lines = []
+        lines.append(f"\n### {opp['symbol']} [CORTO]")
+        lines.append(f"**Score: {opp['total_score']:.0f}/100** | **Señal: {opp['signal']}**")
+        lines.append(f"\nPrecio: ${opp.get('price', 'N/A')}")
+
+        breakdown = opp.get("breakdown", {})
+        if breakdown:
+            lines.append(f"\n**Desglose del Comité de Cortos:**")
+            lines.append(f"  Régimen (inverso): {breakdown.get('regime', 0)}/15")
+            lines.append(f"  Parabólico (Qullamaggie): {breakdown.get('parabolic', 0)}/30")
+            lines.append(f"  Stage 4 Rejection (Weinstein): {breakdown.get('stage4_rejection', 0)}/30")
+            lines.append(f"  PEAD Miss (académico): {breakdown.get('pead_miss', 0)}/25")
+
+        reasoning = opp.get("reasoning", {})
+        if reasoning:
+            lines.append(f"\n**Razonamiento:**")
+            for component, reasons in reasoning.items():
+                if reasons:
+                    lines.append(f"\n*{component.capitalize()}:*")
+                    for r in reasons:
+                        lines.append(f"  {r}")
+
+        setup = opp.get("trade_setup")
+        if setup:
+            lines.append(f"\n**Trade Setup (CORTO):**")
+            lines.append(f"  Entry: ${setup.get('entry', 'N/A')}")
+            lines.append(f"  Stop Loss: ${setup.get('stop', 'N/A')} (+{setup.get('stop_pct', 'N/A')}% arriba)")
+            lines.append(f"  Take Profit: ${setup.get('target', 'N/A')} (-{setup.get('target_pct', 'N/A')}%)")
+            lines.append(f"  Risk:Reward: 1:{setup.get('rr_ratio', 'N/A')}")
+            lines.append(f"  Position: €{setup.get('position_eur', 0):.0f}")
+            max_days = setup.get("max_hold_days_before_fees_material", 10)
+            lines.append(f"  Max días recomendado (fees eToro): {max_days}d")
+
+        return "\n".join(lines)
 
     def _format_opportunity(self, opp: dict) -> str:
         """Formatea una oportunidad individual con reasoning del comité"""
@@ -862,8 +1106,11 @@ def create_github_issue_body(scan_result: dict) -> tuple:
     opps = scan_result.get("opportunities", [])
     ms = scan_result.get("market_status", {})
 
-    if not opps:
-        title = f"[MARKET SCAN] {datetime.now().strftime('%Y-%m-%d %H:%M')} - Sin oportunidades claras"
+    shorts = scan_result.get("short_opportunities", [])
+    has_any = bool(opps or shorts)
+
+    if not has_any:
+        title = f"[MARKET SCAN] {datetime.now().strftime('%Y-%m-%d %H:%M')} - Sin oportunidades"
         body = f"""## Scan de Mercado - {datetime.now().strftime('%Y-%m-%d %H:%M')}
 
 ### Regimen de Mercado
@@ -873,18 +1120,27 @@ def create_github_issue_body(scan_result: dict) -> tuple:
 - **Nasdaq**: {ms.get('nasdaq_change', 'N/A')}%
 
 ### Resultado
-**No se encontraron oportunidades que cumplan los criterios de calidad.**
+**No se encontraron oportunidades long ni short que cumplan los criterios de calidad.**
 
 > Mejor no operar que forzar un trade mediocre.
 
 ---
-*Generado automaticamente por Investment Advisor*
+*Generado automaticamente por Investment Advisor v3.0 (Long+Short)*
 """
     else:
-        top_opp = opps[0]
-        title = f"[ALERTA COMPRA] {top_opp['symbol']} - Score {top_opp['total_score']:.0f}/100"
+        # Título: mencionar la oportunidad más destacada
+        if opps and shorts:
+            top_long = opps[0]
+            top_short = shorts[0]
+            title = f"[ALERTA] LONG:{top_long['symbol']}({top_long['total_score']:.0f}) SHORT:{top_short['symbol']}({top_short['total_score']:.0f})"
+        elif opps:
+            top_opp = opps[0]
+            title = f"[ALERTA COMPRA] {top_opp['symbol']} - Score {top_opp['total_score']:.0f}/100"
+        else:
+            top_short = shorts[0]
+            title = f"[ALERTA CORTO] {top_short['symbol']} - Score {top_short['total_score']:.0f}/100"
 
-        body = f"""## ALERTA DE OPORTUNIDAD DE INVERSION
+        body = f"""## ALERTA DE OPORTUNIDAD — Investment Advisor v3.0
 
 ### Regimen de Mercado
 - **Estado**: {ms.get('market_regime', 'N/A')}
@@ -894,44 +1150,46 @@ def create_github_issue_body(scan_result: dict) -> tuple:
 ---
 
 """
-        for opp in opps:
-            setup = opp.get("trade_setup", {})
-            breakdown = opp.get("breakdown", {})
-            reasoning = opp.get("reasoning", {})
+        # Sección LONG
+        if opps:
+            body += "## 📈 OPORTUNIDADES LONG\n\n"
+            for opp in opps:
+                setup = opp.get("trade_setup", {}) or {}
+                breakdown = opp.get("breakdown", {})
+                reasoning = opp.get("reasoning", {})
+                mc = opp.get('market_cap') or 0
 
-            body += f"""### {opp['symbol']} - Score: {opp['total_score']:.0f}/100
+                body += f"""### {opp['symbol']} — Score: {opp['total_score']:.0f}/100
 
-| Metrica | Valor |
+| Métrica | Valor |
 |---------|-------|
 | Precio | ${opp.get('price', 'N/A')} |
-| Market Cap | ${opp.get('market_cap', 0)/1e9:.1f}B |
+| Market Cap | ${mc/1e9:.1f}B |
 | Beta | {opp.get('beta', 'N/A')} |
+| Weinstein Stage | {breakdown.get('weinstein_stage', '?')} |
 
 **Desglose del Comité:**
 | Componente | Score | Max |
 |------------|-------|-----|
 | Régimen | {breakdown.get('regime', 0)} | 15 |
-| Turtles (técnico) | {breakdown.get('turtles', 0)} | 25 |
-| Seykota (tendencia) | {breakdown.get('seykota', 0)} | 20 |
-| Catalizador | {breakdown.get('catalyst', 0)} | 25 |
+| Técnico (Minervini+Turtles) | {breakdown.get('turtles', 0)} | 25 |
+| Tendencia (Seykota) | {breakdown.get('seykota', 0)} | 20 |
+| Catalizador+PEAD+Squeeze | {breakdown.get('catalyst', 0)} | 25 |
 | Risk/Reward | {breakdown.get('risk_reward', 0)} | 15 |
 """
-            if breakdown.get('sector_adjustment', 0) != 0:
-                body += f"| Ajuste sector | {breakdown.get('sector_adjustment', 0):+d} | — |\n"
+                if breakdown.get('sector_adjustment', 0) != 0:
+                    body += f"| Ajuste sector | {breakdown.get('sector_adjustment', 0):+d} | — |\n"
 
-            body += "\n**Razonamiento:**\n\n"
+                body += "\n**Razonamiento:**\n\n"
+                for component, reasons in reasoning.items():
+                    if reasons:
+                        body += f"**{component.capitalize()}:**\n"
+                        for reason in reasons:
+                            body += f"- {reason}\n"
+                        body += "\n"
 
-            # Formatear reasoning por componente
-            for component, reasons in reasoning.items():
-                if reasons:
-                    component_name = component.capitalize()
-                    body += f"**{component_name}:**\n"
-                    for reason in reasons:
-                        body += f"- {reason}\n"
-                    body += "\n"
-
-            body += f"""
-**Trade Setup:**
+                body += f"""
+**Trade Setup (LONG):**
 - **Entry**: ${setup.get('entry', 'N/A')}
 - **Stop Loss**: ${setup.get('stop', 'N/A')} (-{setup.get('stop_pct', 'N/A')}%)
 - **Take Profit**: ${setup.get('target', 'N/A')} (+{setup.get('target_pct', 'N/A')}%)
@@ -942,11 +1200,50 @@ def create_github_issue_body(scan_result: dict) -> tuple:
 
 """
 
-        body += """
-> **DISCLAIMER**: Esto NO es consejo financiero. Opera bajo tu propio riesgo.
+        # Sección SHORT
+        if shorts:
+            body += "## 📉 OPORTUNIDADES SHORT\n\n"
+            for s in shorts:
+                setup = s.get("trade_setup") or {}
+                breakdown = s.get("breakdown", {})
+                reasoning = s.get("reasoning", {})
+
+                body += f"""### {s['symbol']} [CORTO] — Score: {s['total_score']:.0f}/100
+
+**Desglose del Comité de Cortos:**
+| Componente | Score | Max |
+|------------|-------|-----|
+| Régimen (inverso) | {breakdown.get('regime', 0)} | 15 |
+| Parabólico (Qullamaggie) | {breakdown.get('parabolic', 0)} | 30 |
+| Stage 4 Rejection (Weinstein) | {breakdown.get('stage4_rejection', 0)} | 30 |
+| PEAD Miss (académico) | {breakdown.get('pead_miss', 0)} | 25 |
+
+**Razonamiento:**
+"""
+                for component, reasons in reasoning.items():
+                    if reasons:
+                        body += f"\n**{component.capitalize()}:**\n"
+                        for reason in reasons:
+                            body += f"- {reason}\n"
+
+                body += f"""
+**Trade Setup (CORTO):**
+- **Entry**: ${setup.get('entry', 'N/A')}
+- **Stop Loss**: ${setup.get('stop', 'N/A')} (+{setup.get('stop_pct', 'N/A')}% arriba)
+- **Take Profit**: ${setup.get('target', 'N/A')} (-{setup.get('target_pct', 'N/A')}%)
+- **Risk:Reward**: 1:{setup.get('rr_ratio', 'N/A')}
+- **Position**: €{setup.get('position_eur', 0):.0f}
+- **Max días (fees eToro)**: {setup.get('max_hold_days_before_fees_material', 10)}d
 
 ---
-*Generado automaticamente por Investment Advisor*
+
+"""
+
+        body += """
+> **DISCLAIMER**: Esto NO es consejo financiero. Trading con apalancamiento conlleva riesgo de pérdida total del capital.
+
+---
+*Generado automaticamente por Investment Advisor v3.0 (Long+Short)*
 """
 
     return title, body
@@ -975,11 +1272,13 @@ def main():
     title, body = create_github_issue_body(result)
 
     # Guardar resultado como JSON para el workflow
+    n_longs = len(result.get("opportunities", []))
+    n_shorts = len(result.get("short_opportunities", []))
     output = {
         "scan_result": result,
         "issue_title": title,
         "issue_body": body,
-        "has_opportunities": len(result.get("opportunities", [])) > 0
+        "has_opportunities": n_longs > 0 or n_shorts > 0
     }
 
     # Escribir a archivo para que el workflow lo use
@@ -987,10 +1286,10 @@ def main():
         json.dump(output, f, indent=2, default=str)
 
     print(f"\nResultado guardado en scan_output.json")
-    print(f"Oportunidades encontradas: {len(result.get('opportunities', []))}")
+    print(f"Oportunidades LONG: {n_longs} | Oportunidades SHORT: {n_shorts}")
 
-    # Exit code basado en si hay oportunidades
-    if result.get("opportunities"):
+    # Exit code basado en si hay oportunidades (long o short)
+    if n_longs > 0 or n_shorts > 0:
         print("\n** HAY OPORTUNIDADES - SE CREARA ALERTA **")
         return 0
     else:
