@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Optional
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # Importar el comité virtual
 from committee import evaluate_opportunity
@@ -685,36 +687,52 @@ class MarketScanner:
         # 3. Cargar calendario de earnings (catalizadores)
         self._load_earnings_calendar()
 
-        # 3. Escanear watchlist
+        # 3. Escanear watchlist en paralelo
         opportunities = []
         watchlist_items = []
         skipped = []
+        print_lock = threading.Lock()
 
-        for symbol in watchlist:
-            print(f"  Analizando {symbol}...", end=" ")
-
-            # Obtener info de catalizador si existe
+        def scan_symbol(symbol: str) -> dict:
             catalyst_info = self.earnings_calendar.get(symbol)
-            if catalyst_info:
-                print(f"[EARNINGS en {catalyst_info['days_ahead']}d] ", end="")
-
             result = self.scorer.score_opportunity(symbol, catalyst_info)
+            return {"symbol": symbol, "catalyst_info": catalyst_info, "result": result}
 
-            if result.get("error"):
-                print(f"ERROR: {result['error']}")
-                continue
+        # 5 workers: balance entre velocidad y rate limiting de Yahoo Finance
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(scan_symbol, sym): sym for sym in watchlist}
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                try:
+                    item = future.result()
+                    symbol = item["symbol"]
+                    catalyst_info = item["catalyst_info"]
+                    result = item["result"]
 
-            score = result.get("total_score", 0)
-            signal = result.get("signal", "SKIP")
+                    if result.get("error"):
+                        with print_lock:
+                            print(f"  {symbol}: ERROR: {result['error']}")
+                        continue
 
-            print(f"Score: {score:.0f} - {signal}")
+                    score = result.get("total_score", 0)
+                    signal = result.get("signal", "SKIP")
+                    catalyst_tag = f"[EARNINGS en {catalyst_info['days_ahead']}d] " if catalyst_info else ""
 
-            if signal == "COMPRA":
-                opportunities.append(result)
-            elif signal == "WATCHLIST":
-                watchlist_items.append(result)
-            else:
-                skipped.append(result)
+                    with print_lock:
+                        print(f"  [{completed}/{len(watchlist)}] {symbol} {catalyst_tag}Score: {score:.0f} - {signal}")
+
+                    if signal == "COMPRA":
+                        opportunities.append(result)
+                    elif signal == "WATCHLIST":
+                        watchlist_items.append(result)
+                    else:
+                        skipped.append(result)
+
+                except Exception as e:
+                    sym = futures[future]
+                    with print_lock:
+                        print(f"  {sym}: EXCEPCION: {e}")
 
         # Ordenar por score
         opportunities.sort(key=lambda x: x["total_score"], reverse=True)

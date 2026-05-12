@@ -67,9 +67,9 @@ def evaluate_catalyst(ticker_data: Dict, catalyst_info: Optional[Dict]) -> Dict:
     if not catalyst_info:
         return {
             "style": "catalyst",
-            "score": 12,  # Score neutro (casi la mitad)
+            "score": 14,  # Score neutro — sin catalizador no es malo, simplemente neutral
             "max_score": 25,
-            "reasoning": ["~ Sin catalizador identificado — scoring basado en setup técnico"],
+            "reasoning": ["~ Sin catalizador identificado — scoring basado en setup técnico puro"],
             "signals": {
                 "catalyst_type": "none",
                 "days_to_event": 999,

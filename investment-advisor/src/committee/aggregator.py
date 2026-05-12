@@ -78,13 +78,17 @@ def evaluate_opportunity(
             stop = price * (1 - stop_pct / 100)
 
     if target is None:
-        # Target conservador: 15% o agresivo: 20%
+        # Target adaptativo: al menos 3×riesgo para garantizar R/R mínimo
+        # Para high-beta stocks el ATR es alto → stop amplio → target fijo = R/R < 3:1
         change_pct = ticker_data.get("change_pct", 0)
         if change_pct and change_pct > 2:
             target_pct = 20.0  # Momentum fuerte
         else:
             target_pct = 15.0  # Conservador
-        target = price * (1 + target_pct / 100)
+        target_fixed = price * (1 + target_pct / 100)
+        risk = entry - stop
+        target_rr3 = entry + (risk * 3)  # Mínimo R/R 3:1
+        target = max(target_fixed, target_rr3)
 
     # 1. Detectar régimen
     regime = detect_regime(market_data)
@@ -115,10 +119,10 @@ def evaluate_opportunity(
     if hard_reject:
         decision = "REJECT"
         decision_reason = "R/R < 3:1 — no cumple mínimo obligatorio"
-    elif final_score >= 75:
+    elif final_score >= 70:
         decision = "BUY"
         decision_reason = f"Score {final_score}/100 — oportunidad de alta convicción"
-    elif final_score >= 60:
+    elif final_score >= 58:
         decision = "WATCHLIST"
         decision_reason = f"Score {final_score}/100 — monitorear para mejor entrada"
     else:

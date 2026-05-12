@@ -30,8 +30,8 @@
   },
 
   "scoring": {
-    "min_score_for_buy": 75,
-    "min_score_for_watchlist": 60,
+    "min_score_for_buy": 70,
+    "min_score_for_watchlist": 58,
     "system": "virtual_committee",
     "version": "2.0",
     "committee_breakdown": {
