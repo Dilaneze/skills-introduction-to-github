@@ -159,6 +159,69 @@ class MarketDataAPI:
 
         return result
 
+    def _fetch_finnhub_quote(self, symbol: str) -> Optional[dict]:
+        """Fetch quote and historical candle data from Finnhub (primary source)"""
+        if not self.finnhub_key:
+            return None
+
+        try:
+            url = "https://finnhub.io/api/v1/quote"
+            params = {"symbol": symbol, "token": self.finnhub_key}
+            response = requests.get(url, params=params, timeout=10, proxies={"http": None, "https": None})
+
+            if response.status_code != 200:
+                return None
+
+            data = response.json()
+            price = data.get("c", 0)
+            prev_close = data.get("pc", 0)
+
+            if not price or price == 0:
+                return None
+
+            change_pct = round(((price - prev_close) / prev_close * 100), 2) if prev_close else 0
+
+            # Velas históricas (200 días) para indicadores técnicos
+            to_ts = int(datetime.now().timestamp())
+            from_ts = int((datetime.now() - timedelta(days=280)).timestamp())
+
+            candle_url = "https://finnhub.io/api/v1/stock/candle"
+            candle_params = {
+                "symbol": symbol,
+                "resolution": "D",
+                "from": from_ts,
+                "to": to_ts,
+                "token": self.finnhub_key
+            }
+            candle_response = requests.get(candle_url, params=candle_params, timeout=15, proxies={"http": None, "https": None})
+
+            closes, highs, lows, volumes = [], [], [], []
+            if candle_response.status_code == 200:
+                candle_data = candle_response.json()
+                if candle_data.get("s") == "ok":
+                    closes = candle_data.get("c", [])[-200:]
+                    highs = candle_data.get("h", [])[-200:]
+                    lows = candle_data.get("l", [])[-200:]
+                    volumes = candle_data.get("v", [])[-200:]
+
+            quote = {
+                "symbol": symbol,
+                "price": round(price, 2),
+                "prev_close": round(prev_close, 2) if prev_close else 0,
+                "change_pct": change_pct,
+                "_closes_raw": closes
+            }
+
+            if closes:
+                technical = self._calculate_technical_indicators(closes, highs, lows, volumes)
+                quote.update(technical)
+
+            return quote
+
+        except Exception as e:
+            print(f"[WARN] Finnhub quote failed for {symbol}: {e}")
+            return None
+
     def _fetch_yahoo_quote(self, symbol: str) -> Optional[dict]:
         """Fetch quote from Yahoo Finance with historical data for technical indicators"""
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -378,19 +441,25 @@ class MarketDataAPI:
 
     def get_stock_data(self, symbol: str, market_status: dict = None) -> Optional[dict]:
         """Obtiene datos completos de una accion"""
-        quote = self._fetch_yahoo_quote(symbol)
+        # Quote: Finnhub primario (si hay key), Yahoo fallback
+        # Razón: Yahoo bloquea con 403 frecuentemente (ver LEARNING_LOG.md)
+        quote = None
+        if self.finnhub_key:
+            quote = self._fetch_finnhub_quote(symbol)
+        if not quote:
+            quote = self._fetch_yahoo_quote(symbol)
         if not quote:
             return None
 
         # Limpiar campo interno de datos raw (solo para cálculos internos)
         quote.pop("_closes_raw", None)
 
-        # Obtener datos adicionales de Yahoo
-        yahoo_data_ok = self._fetch_yahoo_details(quote, symbol)
-
-        # Si Yahoo fallo y tenemos Finnhub, usar como fallback
-        if not yahoo_data_ok and self.finnhub_key:
-            self._fetch_finnhub_details(quote, symbol)
+        # Detalles fundamentales: Finnhub primero, Yahoo fallback
+        details_ok = False
+        if self.finnhub_key:
+            details_ok = self._fetch_finnhub_details(quote, symbol)
+        if not details_ok:
+            self._fetch_yahoo_details(quote, symbol)
 
         # Earnings surprise para PEAD (si tenemos Finnhub key)
         if self.finnhub_key:

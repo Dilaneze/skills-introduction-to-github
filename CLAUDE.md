@@ -26,12 +26,13 @@ investment-advisor/
 ```
 
 ### Data Sources (with fallback chain)
-1. **Yahoo Finance** (primary, no API key)
-2. **Finnhub** (fallback, API key required)
+1. **Finnhub** (primary, API key required — más fiable, evita 403s de Yahoo)
+2. **Yahoo Finance** (fallback, no API key)
 3. **Alpha Vantage** (optional)
 4. **FMP** (optional)
 
-**Decisión clave**: Yahoo Finance primero por no requerir API key, Finnhub como fallback robusto.
+**Decisión clave**: Finnhub primero por fiabilidad (Yahoo bloquea con 403 frecuentemente), Yahoo como fallback sin key.
+**Excepción**: `get_market_status()` (^VIX, SPY, NASDAQ) usa Yahoo — Finnhub no soporta estos índices en free tier.
 
 ## Trading Parameters (Professional Swing Trading)
 
@@ -77,7 +78,7 @@ if has_opportunities == true || force_notification == true:
 
 1. **Professional parameters** (commit 5744fbe): Implementados parámetros equilibrados para swing trading real (no aggressive filters anteriores)
 
-2. **Finnhub fallback** (commit 569f0b7): Cuando Yahoo Finance falla, usar Finnhub para robustez
+2. **Finnhub primario** (commit 569f0b7 + fix consistencia): Finnhub como fuente primaria de datos (quote + candle + fundamentals). Yahoo como fallback. Motivo: Yahoo bloquea con 403 frecuentemente (confirmado en LEARNING_LOG semana 06-may). Excepción: índices ^VIX/SPY/NASDAQ siguen en Yahoo (Finnhub free tier no los soporta).
 
 3. **No label requirement** (commit 577ba89): Issues sin labels para evitar errores
 
@@ -122,7 +123,7 @@ cat investment-advisor/src/scan_output.json
 ## Secrets Configuration (GitHub Secrets)
 
 **Required**:
-- `FINNHUB_API_KEY` (Recomendado)
+- `FINNHUB_API_KEY` (Requerido para fuente primaria; sin él el sistema usa Yahoo como fallback)
 
 **Optional**:
 - `ALPHA_VANTAGE_KEY`
