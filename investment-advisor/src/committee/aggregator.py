@@ -1,7 +1,7 @@
 """
-Aggregator - Orquestador del Comité Virtual
+Aggregator — Virtual Committee Orchestrator
 
-Ejecuta todos los evaluadores y genera score final con reasoning completo.
+Runs all evaluators and generates final score with complete reasoning.
 """
 
 from typing import Dict, Optional
@@ -24,18 +24,18 @@ def evaluate_opportunity(
     leverage: int = 5
 ) -> Dict:
     """
-    Ejecuta todos los evaluadores y genera score final con reasoning completo.
+    Run all evaluators and produce a final score with complete reasoning.
 
     Args:
-        ticker: Symbol del ticker
-        ticker_data: Datos del ticker (precios, indicadores técnicos, etc.)
-        market_data: Datos del mercado general (VIX, S&P 500, etc.)
-        catalyst_info: Info del catalizador (opcional)
-        entry: Precio de entrada propuesto (si None, usa precio actual)
-        stop: Stop loss propuesto (si None, lo calcula automáticamente)
-        target: Take profit propuesto (si None, lo calcula automáticamente)
-        capital: Capital disponible
-        leverage: Apalancamiento
+        ticker: Stock symbol
+        ticker_data: Price data and technical indicators
+        market_data: General market data (VIX, S&P 500, etc.)
+        catalyst_info: Catalyst information (optional)
+        entry: Proposed entry price (if None, uses current price)
+        stop: Proposed stop loss (if None, calculated automatically)
+        target: Proposed take profit (if None, calculated automatically)
+        capital: Available capital
+        leverage: Leverage multiplier
 
     Returns:
         {
@@ -52,28 +52,24 @@ def evaluate_opportunity(
     price = ticker_data.get("price", 0)
 
     if price <= 0:
-        return _error_result(ticker, "No hay datos de precio")
+        return _error_result(ticker, "No price data available")
 
-    # Gate Weinstein: no comprar en Stage 4 (declive confirmado)
-    # Stage 4 = precio < SMA150 declinante → es territorio de shorts, no longs
+    # Weinstein gate: do not buy in Stage 4 (confirmed decline)
+    # Stage 4 = price < declining SMA150 → short territory, not long
     stage = compute_weinstein_stage(ticker_data)
     if stage == 4:
         return _skip_stage4_result(ticker, price)
 
-    # Calcular entry, stop y target si no se proporcionan
     if entry is None:
-        entry = price * 0.995  # Pequeño descuento para limit order
+        entry = price * 0.995  # Small discount for limit order
 
     if stop is None:
-        # Stop loss adaptativo basado en ATR y beta
         atr = ticker_data.get("atr_14", 0)
         beta = ticker_data.get("beta", 1.5)
 
         if atr > 0:
-            # Stop = 2× ATR (típico para Turtles)
-            stop = price - (atr * 2)
+            stop = price - (atr * 2)  # Turtles-style stop: 2× ATR
         else:
-            # Sin ATR, usar % fijo basado en beta
             if beta >= 2.0:
                 stop_pct = 10.0
             elif beta >= 1.5:
@@ -83,28 +79,26 @@ def evaluate_opportunity(
             stop = price * (1 - stop_pct / 100)
 
     if target is None:
-        # Target adaptativo: al menos 3×riesgo para garantizar R/R mínimo
-        # Para high-beta stocks el ATR es alto → stop amplio → target fijo = R/R < 3:1
         change_pct = ticker_data.get("change_pct", 0)
         if change_pct and change_pct > 2:
-            target_pct = 20.0  # Momentum fuerte
+            target_pct = 20.0  # Strong momentum
         else:
-            target_pct = 15.0  # Conservador
+            target_pct = 15.0  # Conservative
         target_fixed = price * (1 + target_pct / 100)
         risk = entry - stop
-        target_rr3 = entry + (risk * 3)  # Mínimo R/R 3:1
+        target_rr3 = entry + (risk * 3)  # Minimum 3:1 R/R
         target = max(target_fixed, target_rr3)
 
-    # 1. Detectar régimen
+    # 1. Detect regime
     regime = detect_regime(market_data)
 
-    # 2. Evaluar cada componente
+    # 2. Evaluate each component
     turtles = evaluate_turtles(ticker_data)
     seykota = evaluate_seykota(ticker_data)
     catalyst = evaluate_catalyst(ticker_data, catalyst_info)
     risk_reward = evaluate_risk_reward(ticker_data, entry, stop, target, capital, leverage)
 
-    # 3. Sumar scores
+    # 3. Sum scores
     raw_score = (
         regime["score"] +
         turtles["score"] +
@@ -113,26 +107,26 @@ def evaluate_opportunity(
         risk_reward["score"]
     )
 
-    # 4. Ajuste por sector/régimen
+    # 4. Sector/regime adjustment
     sector = ticker_data.get("sector")
     final_score = apply_sector_adjustment(raw_score, sector, regime)
     sector_adjustment = final_score - raw_score
 
-    # 5. Check hard rejects
+    # 5. Hard reject check
     hard_reject = risk_reward.get("hard_reject", False)
 
     if hard_reject:
         decision = "REJECT"
-        decision_reason = "R/R < 3:1 — no cumple mínimo obligatorio"
+        decision_reason = "R/R < 3:1 — does not meet mandatory minimum"
     elif final_score >= 70:
         decision = "BUY"
-        decision_reason = f"Score {final_score}/100 — oportunidad de alta convicción"
+        decision_reason = f"Score {final_score}/100 — high-conviction opportunity"
     elif final_score >= 58:
         decision = "WATCHLIST"
-        decision_reason = f"Score {final_score}/100 — monitorear para mejor entrada"
+        decision_reason = f"Score {final_score}/100 — monitor for better entry"
     else:
         decision = "SKIP"
-        decision_reason = f"Score {final_score}/100 — insuficiente convicción"
+        decision_reason = f"Score {final_score}/100 — insufficient conviction"
 
     return {
         "ticker": ticker,
@@ -177,17 +171,17 @@ def evaluate_opportunity(
 
 
 def _skip_stage4_result(ticker: str, price: float) -> Dict:
-    """Resultado cuando el stock está en Weinstein Stage 4 (declive confirmado)."""
+    """Result when stock is in Weinstein Stage 4 (confirmed decline)."""
     return {
         "ticker": ticker,
         "decision": "SKIP",
-        "decision_reason": "Weinstein Stage 4 — stock en declive (precio < SMA150 declinante). Ver short scanner.",
+        "decision_reason": "Weinstein Stage 4 — stock in decline (price < declining SMA150). Check short scanner.",
         "final_score": 0,
         "regime": {"regime": "stage4_blocked", "score": 0, "reasoning": "Stage 4 gate"},
         "breakdown": {"regime": 0, "turtles": 0, "seykota": 0, "catalyst": 0, "risk_reward": 0,
                        "sector_adjustment": 0, "raw_score": 0, "weinstein_stage": 4},
         "reasoning": {
-            "regime": ["✗ Stage 4 Weinstein: stock en declive confirmado — no apto para long"],
+            "regime": ["✗ Weinstein Stage 4: stock in confirmed decline — not suitable for long"],
             "turtles": [], "seykota": [], "catalyst": [], "risk_reward": []
         },
         "trade_params": {"entry": price, "stop": 0, "target": 0, "rr_ratio": 0,
@@ -196,7 +190,7 @@ def _skip_stage4_result(ticker: str, price: float) -> Dict:
 
 
 def _error_result(ticker: str, error_msg: str) -> Dict:
-    """Retorna resultado de error cuando no se puede evaluar."""
+    """Return error result when stock cannot be evaluated."""
     return {
         "ticker": ticker,
         "decision": "SKIP",
@@ -204,29 +198,15 @@ def _error_result(ticker: str, error_msg: str) -> Dict:
         "final_score": 0,
         "regime": {"regime": "unknown", "score": 0, "reasoning": error_msg},
         "breakdown": {
-            "regime": 0,
-            "turtles": 0,
-            "seykota": 0,
-            "catalyst": 0,
-            "risk_reward": 0,
-            "sector_adjustment": 0,
-            "raw_score": 0
+            "regime": 0, "turtles": 0, "seykota": 0, "catalyst": 0, "risk_reward": 0,
+            "sector_adjustment": 0, "raw_score": 0
         },
         "reasoning": {
-            "regime": [error_msg],
-            "turtles": [],
-            "seykota": [],
-            "catalyst": [],
-            "risk_reward": []
+            "regime": [error_msg], "turtles": [], "seykota": [], "catalyst": [], "risk_reward": []
         },
         "trade_params": {
-            "entry": 0,
-            "stop": 0,
-            "target": 0,
-            "rr_ratio": 0,
-            "position_eur": 0,
-            "stop_pct": 0,
-            "target_pct": 0
+            "entry": 0, "stop": 0, "target": 0, "rr_ratio": 0,
+            "position_eur": 0, "stop_pct": 0, "target_pct": 0
         },
         "signals": {}
     }

@@ -1,10 +1,10 @@
 """
-Short Selling Committee — Sistema de scoring para posiciones en corto
+Short Selling Committee — Scoring system for short positions
 
-El comité evalúa setups de short selling desde tres perspectivas independientes:
-- Parabolic Short (Qullamaggie): Climax runs y agotamiento de momentum
-- Stage 4 Rejection (Weinstein): Rebotes rechazados en SMA 150 declinante
-- PEAD Miss (académico): Post-Earnings Announcement Drift negativo
+The committee evaluates short selling setups from three independent perspectives:
+- Parabolic Short (Qullamaggie): Climax runs and momentum exhaustion
+- Stage 4 Rejection (Weinstein): Failed bounces at declining SMA 150
+- PEAD Miss (academic): Post-Earnings Announcement Drift (negative)
 """
 
 from .parabolic import evaluate_parabolic

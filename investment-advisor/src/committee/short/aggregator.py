@@ -1,14 +1,14 @@
 """
-Short Committee Aggregator — Orquestador de posiciones en corto
+Short Committee Aggregator — Short position orchestrator
 
-Combina Parabolic + Stage4Rejection + PEAD_Miss con contexto de régimen.
-El régimen favorece los cortos en mercados RISK-OFF (inverso al comité de longs).
+Combines Parabolic + Stage4Rejection + PEAD_Miss with regime context.
+Regime favors shorts in RISK-OFF markets (inverse of the long committee).
 
-Puntuación total: 100 pts
-- Régimen (inverso al de longs): 0-15 pts
+Total score: 100 pts
+- Regime (inverted vs longs): 0-15 pts
 - Parabolic (Qullamaggie): 0-30 pts
 - Stage 4 Rejection (Weinstein): 0-30 pts
-- PEAD Miss (académico): 0-25 pts
+- PEAD Miss: 0-25 pts
 
 SHORT:           >= 55 pts
 WATCHLIST_SHORT: 40-54 pts
@@ -21,7 +21,7 @@ from .parabolic import evaluate_parabolic
 from .stage4_rejection import evaluate_stage4_rejection
 from .pead_miss import evaluate_pead_miss
 
-# Régimen invertido: RISK-OFF favorece los cortos
+# Inverted regime: RISK-OFF favors shorts
 _REGIME_SHORT = {
     "risk_off": 15,
     "neutral": 10,
@@ -29,7 +29,7 @@ _REGIME_SHORT = {
     "unknown": 8,
 }
 
-# Coste overnight eToro para posiciones short (~8.25%/año)
+# eToro overnight cost for short positions (~8.25%/year)
 _ETORO_SHORT_DAILY_PCT = 0.0226
 
 
@@ -42,42 +42,42 @@ def evaluate_short_opportunity(
     leverage: int = 5
 ) -> Dict:
     """
-    Evalúa una oportunidad de short selling.
+    Evaluate a short selling opportunity.
 
-    Para shorts en eToro (CFDs):
-    - Stop ARRIBA del entry (5-8%)
-    - Target ABAJO del entry (15-25%)
-    - R/R mínimo 2:1 (win rate ~45-55% en shorts)
-    - Máximo 10 días para que fees no devoren el profit
+    For shorts on eToro (CFDs):
+    - Stop ABOVE entry (5-8%)
+    - Target BELOW entry (15-25%)
+    - Minimum R/R 2:1 (short win rate ~45-55%)
+    - Max 10 days before fees erode profit
     """
     price = ticker_data.get("price", 0)
 
     if price <= 0:
-        return _error_result(ticker, "Sin datos de precio")
+        return _error_result(ticker, "No price data")
 
-    # Entry para short ligeramente sobre precio actual
+    # Entry for short slightly above current price
     entry = price * 1.002
 
-    # Stop basado en estructura: SMA150 (Stage 4) o ATR (parabólico)
+    # Stop based on structure: SMA150 (Stage 4) or ATR (parabolic)
     sma_150 = ticker_data.get("sma_150", 0)
     atr = ticker_data.get("atr_14", 0)
 
     if sma_150 > price and sma_150 > 0:
-        # Stage 4: stop natural en SMA150 + margen del 3%
+        # Stage 4: natural stop at SMA150 + 3% margin
         stop = sma_150 * 1.03
     elif atr > 0:
-        # Parabólico: stop = 2×ATR arriba del entry
+        # Parabolic: stop = 2×ATR above entry
         stop = entry + (atr * 2)
     else:
-        stop = entry * 1.065  # 6.5% stop por defecto
+        stop = entry * 1.065  # 6.5% default stop
 
-    # Target: mínimo R/R 2.5:1 Y al menos 15% de bajada
+    # Target: minimum R/R 2.5:1 AND at least 15% decline
     risk = stop - entry
     target_rr25 = entry - (risk * 2.5)
     target_15pct = entry * 0.85
-    target = min(target_rr25, target_15pct)  # El más abajo de los dos
+    target = min(target_rr25, target_15pct)  # The lower of the two
 
-    # Régimen (invertido para shorts)
+    # Regime (inverted for shorts)
     vix = market_data.get("vix")
     spy_trend = market_data.get("spy_above_200ema", True)
 
@@ -93,13 +93,13 @@ def evaluate_short_opportunity(
     regime_score = _REGIME_SHORT.get(regime_type, 8)
     vix_str = f"{vix:.1f}" if vix else "N/A"
     regime_reasoning = [
-        f"Régimen {regime_type} (VIX: {vix_str}) — "
-        + ("favorable para shorts ↓" if regime_score >= 12
-           else "mercado alcista, shorts más difíciles ↑" if regime_score <= 5
-           else "neutral para shorts")
+        f"Regime {regime_type} (VIX: {vix_str}) — "
+        + ("favorable for shorts ↓" if regime_score >= 12
+           else "bull market, shorts harder ↑" if regime_score <= 5
+           else "neutral for shorts")
     ]
 
-    # Evaluar los tres componentes
+    # Evaluate three components
     parabolic = evaluate_parabolic(ticker_data)
     stage4 = evaluate_stage4_rejection(ticker_data)
     pead = evaluate_pead_miss(ticker_data, catalyst_info)
@@ -107,14 +107,14 @@ def evaluate_short_opportunity(
     raw_score = regime_score + parabolic["score"] + stage4["score"] + pead["score"]
     final_score = min(raw_score, 100)
 
-    # R/R para short
+    # R/R for short
     rr_ratio = (entry - target) / (stop - entry) if (stop - entry) > 0 else 0
     stop_pct = (stop - entry) / entry * 100
     target_pct = (entry - target) / entry * 100
 
     hard_reject = rr_ratio < 2.0
 
-    # Position sizing (más conservador que longs: 1.5% riesgo por trade)
+    # Position sizing (more conservative than longs: 1.5% risk per trade)
     max_risk_eur = capital * 0.015
     if (stop - entry) > 0:
         position_eur = min(
@@ -124,7 +124,7 @@ def evaluate_short_opportunity(
     else:
         position_eur = 0
 
-    # Días máximos antes de que fees sean materiales (>3% del move target)
+    # Max days before fees become material (>3% of target move)
     if target_pct > 0 and _ETORO_SHORT_DAILY_PCT > 0:
         max_hold_days = int((target_pct * 0.15) / (_ETORO_SHORT_DAILY_PCT * leverage))
     else:
@@ -132,16 +132,16 @@ def evaluate_short_opportunity(
 
     if hard_reject:
         decision = "REJECT_SHORT"
-        decision_reason = f"R/R {rr_ratio:.1f}:1 — insuficiente para short (mínimo 2:1)"
+        decision_reason = f"R/R {rr_ratio:.1f}:1 — insufficient for short (minimum 2:1)"
     elif final_score >= 55:
         decision = "SHORT"
-        decision_reason = f"Score {final_score}/100 — corto de alta convicción"
+        decision_reason = f"Score {final_score}/100 — high-conviction short"
     elif final_score >= 40:
         decision = "WATCHLIST_SHORT"
-        decision_reason = f"Score {final_score}/100 — monitorear para entry de corto"
+        decision_reason = f"Score {final_score}/100 — monitor for short entry"
     else:
         decision = "SKIP_SHORT"
-        decision_reason = f"Score {final_score}/100 — setup insuficiente"
+        decision_reason = f"Score {final_score}/100 — insufficient setup"
 
     return {
         "ticker": ticker,

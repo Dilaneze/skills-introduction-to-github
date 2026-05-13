@@ -2,16 +2,14 @@
 Parabolic Short — Qullamaggie Methodology
 
 "My 3 Timeless Setups" — qullamaggie.com
-Stocks que suben 100-500% en meses y luego se aceleran siempre revierten.
-El edge: identificar el agotamiento ANTES de que el mercado lo descuente.
+Stocks that run 100-500% in months and then accelerate always revert.
+The edge: identify exhaustion BEFORE the market discounts it.
 
-Referencia repo: github.com/tradermonty/claude-trading-skills
-
-Puntuación: 0-30 puntos
-- Extensión sobre SMA 50 (cuán lejos está del equilibrio): 10 pts
-- Run previo 60 días (la carrera que precede el parabólico): 8 pts
-- RSI extremo overbought (agotamiento de compradores): 7 pts
-- Volume climax reciente (distribución disfrazada de euforia): 5 pts
+Score: 0-30 points
+- Extension above SMA 50 (distance from equilibrium): 10 pts
+- Prior 60-day run (the run that precedes the parabolic): 8 pts
+- Extreme overbought RSI (buyer exhaustion): 7 pts
+- Recent volume climax (institutional distribution disguised as euphoria): 5 pts
 """
 
 from typing import Dict
@@ -19,12 +17,12 @@ from typing import Dict
 
 def evaluate_parabolic(ticker_data: Dict) -> Dict:
     """
-    Evalúa setup de parabolic short. Mayor score = más sobreextendido
-    y más probable la reversión hacia la media.
+    Evaluate parabolic short setup. Higher score = more overextended
+    and higher probability of mean-reversion.
 
-    Entry ideal: primera crack (cierre bajo EMA 20 tras run parabólico).
-    Stop: 5-8% arriba del entry.
-    Target: regreso a SMA 50 (20-40% abajo).
+    Ideal entry: first crack (close below EMA 20 after parabolic run).
+    Stop: 5-8% above entry.
+    Target: reversion to SMA 50 (20-40% below).
     """
     price = ticker_data.get("price", 0)
     ema_50 = ticker_data.get("ema_50", 0)
@@ -39,86 +37,86 @@ def evaluate_parabolic(ticker_data: Dict) -> Dict:
     reasoning = []
 
     if price <= 0:
-        return _empty_result("Sin datos de precio")
+        return _empty_result("No price data")
 
-    # 1. Extensión sobre SMA 50 (10 puntos)
+    # 1. Extension above SMA 50 (10 points)
     if ema_50 > 0:
         extension_pct = (price - ema_50) / ema_50 * 100
         if extension_pct >= 50:
             score += 10
-            reasoning.append(f"✓✓ {extension_pct:.0f}% sobre SMA50 — extremo parabólico, reversión casi segura")
+            reasoning.append(f"✓✓ {extension_pct:.0f}% above SMA50 — extreme parabolic, reversion near-certain")
         elif extension_pct >= 30:
             score += 7
-            reasoning.append(f"✓ {extension_pct:.0f}% sobre SMA50 — muy extendido, setup madurando")
+            reasoning.append(f"✓ {extension_pct:.0f}% above SMA50 — very extended, setup maturing")
         elif extension_pct >= 15:
             score += 4
-            reasoning.append(f"~ {extension_pct:.0f}% sobre SMA50 — extendido pero no extremo")
+            reasoning.append(f"~ {extension_pct:.0f}% above SMA50 — extended but not extreme")
         elif extension_pct >= 5:
             score += 1
-            reasoning.append(f"✗ Solo {extension_pct:.0f}% sobre SMA50 — extensión insuficiente para parabólico")
+            reasoning.append(f"✗ Only {extension_pct:.0f}% above SMA50 — insufficient extension for parabolic")
         else:
-            reasoning.append(f"✗ Precio cercano o bajo SMA50 — no hay setup parabólico")
+            reasoning.append("✗ Price near or below SMA50 — no parabolic setup")
     else:
-        reasoning.append("✗ Sin datos de SMA50")
+        reasoning.append("✗ No SMA50 data")
 
-    # 2. Run previo 60 días (8 puntos) — la carrera que crea el parabólico
+    # 2. Prior 60-day run (8 points) — the run that creates the parabolic
     if price_60d_ago > 0 and price_60d_ago != price:
         run_60d = (price - price_60d_ago) / price_60d_ago * 100
         if run_60d >= 100:
             score += 8
-            reasoning.append(f"✓✓ +{run_60d:.0f}% en 60 días — carrera parabólica confirmada (>100%)")
+            reasoning.append(f"✓✓ +{run_60d:.0f}% in 60 days — parabolic run confirmed (>100%)")
         elif run_60d >= 50:
             score += 6
-            reasoning.append(f"✓ +{run_60d:.0f}% en 60 días — run fuerte")
+            reasoning.append(f"✓ +{run_60d:.0f}% in 60 days — strong run")
         elif run_60d >= 30:
             score += 4
-            reasoning.append(f"~ +{run_60d:.0f}% en 60 días — momentum moderado")
+            reasoning.append(f"~ +{run_60d:.0f}% in 60 days — moderate momentum")
         elif run_60d >= 15:
             score += 1
-            reasoning.append(f"✗ Solo +{run_60d:.0f}% en 60d — insuficiente para short parabólico")
+            reasoning.append(f"✗ Only +{run_60d:.0f}% in 60d — insufficient for parabolic short")
         else:
-            reasoning.append(f"✗ Sin run previo significativo ({run_60d:.0f}% en 60d)")
+            reasoning.append(f"✗ No significant prior run ({run_60d:.0f}% in 60d)")
     else:
-        reasoning.append("✗ Sin datos históricos de 60 días")
+        reasoning.append("✗ No 60-day historical data")
 
-    # 3. RSI extremo (7 puntos) — agotamiento de compradores
+    # 3. Extreme RSI (7 points) — buyer exhaustion
     if rsi_14 >= 85:
         score += 7
-        reasoning.append(f"✓✓ RSI {rsi_14:.0f} — agotamiento extremo (bears preparándose)")
+        reasoning.append(f"✓✓ RSI {rsi_14:.0f} — extreme exhaustion (bears loading up)")
     elif rsi_14 >= 80:
         score += 5
         reasoning.append(f"✓ RSI {rsi_14:.0f} — overbought")
     elif rsi_14 >= 75:
         score += 2
-        reasoning.append(f"~ RSI {rsi_14:.0f} — elevado, no extremo")
+        reasoning.append(f"~ RSI {rsi_14:.0f} — elevated but not extreme")
     else:
-        reasoning.append(f"✗ RSI {rsi_14:.0f} — sin señal de agotamiento")
+        reasoning.append(f"✗ RSI {rsi_14:.0f} — no exhaustion signal")
 
-    # 4. Volume climax (5 puntos) — distribución institucional disfrazada
+    # 4. Volume climax (5 points) — institutional distribution disguised as euphoria
     vol_ratio = volume / avg_volume if avg_volume > 0 else 1.0
     if vol_ratio >= 2.5:
         score += 5
-        reasoning.append(f"✓✓ Volume climax {vol_ratio:.1f}x — probable distribución institucional")
+        reasoning.append(f"✓✓ Volume climax {vol_ratio:.1f}x — likely institutional distribution")
     elif vol_ratio >= 1.5:
         score += 3
-        reasoning.append(f"✓ Volume elevado {vol_ratio:.1f}x")
+        reasoning.append(f"✓ Elevated volume {vol_ratio:.1f}x")
     elif vol_ratio >= 1.1:
         score += 1
-        reasoning.append(f"~ Volume ligeramente elevado {vol_ratio:.1f}x")
+        reasoning.append(f"~ Slightly elevated volume {vol_ratio:.1f}x")
     else:
-        reasoning.append(f"✗ Volume normal {vol_ratio:.1f}x — sin climax")
+        reasoning.append(f"✗ Normal volume {vol_ratio:.1f}x — no climax")
 
-    # Entry trigger: ¿ya comenzó la primera crack?
+    # Entry trigger: has the first crack started?
     entry_trigger = "PENDING"
     if ema_20 > 0:
         if price < ema_20 and price_5d_ago > ema_20:
             entry_trigger = "ACTIVE"
-            reasoning.append("🎯 ENTRADA ACTIVA: primera crack bajo EMA20 confirmada")
+            reasoning.append("🎯 ENTRY ACTIVE: first crack below EMA20 confirmed")
         elif price < ema_20:
             entry_trigger = "PAST_ENTRY"
-            reasoning.append("~ Ya bajo EMA20 (entrada óptima fue hace unos días)")
+            reasoning.append("~ Already below EMA20 (optimal entry was a few days ago)")
         else:
-            reasoning.append("⏳ Aún sobre EMA20 — esperar primera crack para entrada en corto")
+            reasoning.append("⏳ Still above EMA20 — wait for first crack to enter short")
 
     return {
         "style": "parabolic",

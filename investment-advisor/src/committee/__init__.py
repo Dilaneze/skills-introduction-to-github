@@ -1,17 +1,17 @@
 """
-Virtual Committee v3.0 — Sistema de scoring bidireccional (long + short)
+Virtual Committee v3.0 — Bidirectional scoring system (long + short)
 
-Comité de LONGS (Catalyst-Driven Swing):
-- Régimen de mercado (Druckenmiller): Contexto macro
-- Setup técnico (Minervini + Turtles): Trend Template + breakout con volumen
-- Trend alignment (Seykota + Weinstein): Stage 2 gate + EMAs alineadas
-- Catalizador (PEAD + Squeeze): Timing de eventos + short squeeze detection
-- Risk/Reward (Simons): Validación estadística
+LONG Committee (Catalyst-Driven Swing):
+- Market regime (Druckenmiller): Macro context
+- Technical setup (Minervini + Turtles): Trend Template + volume breakout
+- Trend alignment (Seykota + Weinstein): Stage 2 gate + aligned EMAs
+- Catalyst (PEAD + Squeeze): Event timing + short squeeze detection
+- Risk/Reward (Simons): Statistical validation
 
-Comité de SHORTS (Multi-strategy):
-- Parabolic Short (Qullamaggie): Climax runs y reversión
-- Stage 4 Rejection (Weinstein): Rebote fallido en SMA 150 declinante
-- PEAD Miss (académico): Post-earnings drift negativo
+SHORT Committee (Multi-strategy):
+- Parabolic Short (Qullamaggie): Climax runs and reversal
+- Stage 4 Rejection (Weinstein): Failed bounce at declining SMA 150
+- PEAD Miss (academic): Post-earnings negative drift
 """
 
 from .regime_detector import detect_regime

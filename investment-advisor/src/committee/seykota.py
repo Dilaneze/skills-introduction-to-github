@@ -1,14 +1,14 @@
 """
-Trend Alignment - Ed Seykota's Approach
+Trend Alignment — Ed Seykota's Approach
 
-"The trend is your friend" - Confirma que no estás contra la corriente.
-"Market Wizards" (Schwager) — gestión emocional del riesgo mediante trend following.
+"The trend is your friend" — Confirms you are not trading against the current.
+"Market Wizards" (Schwager) — emotional risk management through trend following.
 
-Puntuación: 0-20 puntos distribuidos en:
-- Precio > EMA 20: 6 pts
+Score: 0-20 points distributed across:
+- Price > EMA 20: 6 pts
 - EMA 20 > EMA 50: 6 pts
-- EMA 50 > EMA 200: 4 pts (tendencia de largo plazo)
-- Momentum positivo (10 días): 4 pts
+- EMA 50 > EMA 200: 4 pts (long-term trend)
+- Positive momentum (10 days): 4 pts
 """
 
 from typing import Dict
@@ -16,24 +16,24 @@ from typing import Dict
 
 def compute_weinstein_stage(ticker_data: Dict) -> int:
     """
-    Clasifica el stock en Weinstein Stage 1-4 usando SMA 150 (30-week).
+    Classify stock into Weinstein Stage 1-4 using SMA 150 (30-week).
 
-    Stage 1: Basing  — precio < SMA150, SMA150 plana/subiendo levemente
-    Stage 2: Advancing — precio > SMA150, SMA150 subiendo  ← LONG
-    Stage 3: Topping — precio > SMA150, SMA150 aplanando
-    Stage 4: Declining — precio < SMA150, SMA150 declinando ← SHORT
+    Stage 1: Basing    — price < SMA150, SMA150 flat/slightly rising
+    Stage 2: Advancing — price > SMA150, SMA150 rising  ← LONG
+    Stage 3: Topping   — price > SMA150, SMA150 flattening
+    Stage 4: Declining — price < SMA150, SMA150 declining ← SHORT
 
-    Referencia: Stan Weinstein "Secrets for Profiting in Bull and Bear Markets" (1988)
+    Reference: Stan Weinstein "Secrets for Profiting in Bull and Bear Markets" (1988)
     """
     price = ticker_data.get("price", 0)
     sma_150 = ticker_data.get("sma_150", 0)
     sma_150_20d_ago = ticker_data.get("sma_150_20d_ago", sma_150)
 
     if price <= 0 or sma_150 <= 0:
-        return 0  # Unknown — sin suficiente historia
+        return 0  # Unknown — insufficient history
 
     price_above = price > sma_150
-    # SMA se considera rising si subió >0.1% en 20 días (filtro de ruido)
+    # SMA considered rising if it gained >0.1% over 20 days (noise filter)
     sma_rising = sma_150 > sma_150_20d_ago * 1.001 if sma_150_20d_ago > 0 else True
 
     if price_above:
@@ -44,7 +44,7 @@ def compute_weinstein_stage(ticker_data: Dict) -> int:
 
 def evaluate_seykota(ticker_data: Dict) -> Dict:
     """
-    Evalúa alineación con tendencia (trend following).
+    Evaluate trend alignment (trend following).
 
     Args:
         ticker_data: {
@@ -73,68 +73,66 @@ def evaluate_seykota(ticker_data: Dict) -> Dict:
     score = 0
     reasoning = []
 
-    # 1. Precio sobre EMA corta (6 puntos)
+    # 1. Price above short EMA (6 points)
     if price > 0 and ema_20 > 0:
         if price > ema_20:
             score += 6
             pct_above = (price - ema_20) / ema_20 * 100
-            reasoning.append(f"✓ Precio > EMA20 (+{pct_above:.1f}% — tendencia corto plazo alcista)")
-        elif price >= ema_20 * 0.97:  # Muy cerca (3%)
+            reasoning.append(f"✓ Price > EMA20 (+{pct_above:.1f}% — short-term uptrend)")
+        elif price >= ema_20 * 0.97:  # Very close (3%)
             score += 3
-            reasoning.append(f"~ Precio cerca de EMA20 (soporte clave)")
+            reasoning.append("~ Price near EMA20 (key support)")
         else:
             pct_below = (ema_20 - price) / ema_20 * 100
-            reasoning.append(f"✗ Precio < EMA20 (-{pct_below:.1f}% — debilidad corto plazo)")
+            reasoning.append(f"✗ Price < EMA20 (-{pct_below:.1f}% — short-term weakness)")
     else:
-        reasoning.append(f"✗ Sin datos de EMA20")
+        reasoning.append("✗ No EMA20 data")
 
-    # 2. EMAs alineadas - golden cross structure (6 puntos)
+    # 2. EMAs aligned — golden cross structure (6 points)
     if ema_20 > 0 and ema_50 > 0:
         if ema_20 > ema_50:
             score += 6
-            reasoning.append(f"✓ EMA20 > EMA50 (estructura alcista)")
+            reasoning.append("✓ EMA20 > EMA50 (bullish structure)")
         else:
-            reasoning.append(f"✗ EMA20 < EMA50 (cruce bajista)")
+            reasoning.append("✗ EMA20 < EMA50 (bearish cross)")
     else:
-        reasoning.append(f"✗ Sin datos de EMAs para estructura")
+        reasoning.append("✗ No EMA data for structure check")
 
-    # 3. Tendencia de largo plazo (4 puntos)
+    # 3. Long-term trend (4 points)
     if ema_50 > 0 and ema_200 > 0:
         if ema_50 > ema_200:
             score += 4
-            reasoning.append(f"✓ EMA50 > EMA200 (tendencia mayor alcista)")
+            reasoning.append("✓ EMA50 > EMA200 (major uptrend)")
         else:
-            reasoning.append(f"✗ EMA50 < EMA200 (tendencia mayor bajista — contracorriente)")
+            reasoning.append("✗ EMA50 < EMA200 (major downtrend — against the trend)")
     else:
-        # Si no hay EMA200, dar puntos neutros si EMA50 existe
         if ema_50 > 0:
             score += 2
-            reasoning.append(f"~ Sin EMA200 (asumiendo tendencia neutral)")
+            reasoning.append("~ No EMA200 (assuming neutral long-term trend)")
         else:
-            reasoning.append(f"✗ Sin datos de EMAs largas")
+            reasoning.append("✗ No long EMA data")
 
-    # 4. Momentum reciente (4 puntos)
+    # 4. Recent momentum (4 points)
     if price > 0 and price_10d_ago > 0:
         momentum = (price - price_10d_ago) / price_10d_ago * 100
 
         if momentum > 5:
             score += 4
-            reasoning.append(f"✓ Momentum fuerte +{momentum:.1f}% en 10d")
+            reasoning.append(f"✓ Strong momentum +{momentum:.1f}% in 10d")
         elif momentum > 2:
             score += 3
-            reasoning.append(f"✓ Momentum positivo +{momentum:.1f}% en 10d")
+            reasoning.append(f"✓ Positive momentum +{momentum:.1f}% in 10d")
         elif momentum > 0:
             score += 2
-            reasoning.append(f"~ Momentum leve +{momentum:.1f}% en 10d")
+            reasoning.append(f"~ Mild momentum +{momentum:.1f}% in 10d")
         elif momentum > -3:
             score += 1
-            reasoning.append(f"~ Momentum casi plano {momentum:.1f}% en 10d")
+            reasoning.append(f"~ Near-flat momentum {momentum:.1f}% in 10d")
         else:
-            reasoning.append(f"✗ Momentum negativo {momentum:.1f}% en 10d")
+            reasoning.append(f"✗ Negative momentum {momentum:.1f}% in 10d")
     else:
-        reasoning.append(f"✗ Sin datos de momentum")
+        reasoning.append("✗ No momentum data")
 
-    # Señal de tendencia completamente alineada
     trend_aligned = (
         price > ema_20 > ema_50 > ema_200
         if all(x > 0 for x in [price, ema_20, ema_50, ema_200])
