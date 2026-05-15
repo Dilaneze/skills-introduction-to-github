@@ -170,16 +170,18 @@ def evaluate_catalyst(ticker_data: Dict, catalyst_info: Optional[Dict]) -> Dict:
 def _check_extra_signals(ticker_data: dict) -> dict:
     """
     Señales adicionales independientes del catalizador principal:
-    1. PEAD Long: EPS beat reciente → el precio continúa subiendo (drift)
+    1. PEAD Long: EPS beat reciente → drift alcista activo
     2. Short Squeeze: alto short interest + catalizador = potencial explosivo
+    3. Insider Buying: compras de insiders (Finnhub) o cluster (EDGAR Form 4)
+    4. News Sentiment: NLP bullish/bearish % de Finnhub /news-sentiment
 
-    Puntuación extra: hasta +4 pts sobre el score base de catalyst.
+    Puntuación extra: hasta +7 pts sobre el score base de catalyst.
     """
     score = 0
     reasoning = []
     signals = {}
 
-    # PEAD Long: si hubo earnings beat reciente (vía Finnhub)
+    # 1. PEAD Long: si hubo earnings beat reciente (vía Finnhub)
     eps_surprise_pct = ticker_data.get("eps_surprise_pct")
     days_since_earnings = ticker_data.get("days_since_earnings")
 
@@ -195,7 +197,7 @@ def _check_extra_signals(ticker_data: dict) -> dict:
     else:
         signals["pead_long_active"] = False
 
-    # Short Squeeze: alto short interest + momentum = potencial explosivo
+    # 2. Short Squeeze: alto short interest + momentum = potencial explosivo
     short_pct = ticker_data.get("short_pct")  # % del float en corto
     short_ratio = ticker_data.get("short_ratio")  # días para cubrir
 
@@ -211,5 +213,54 @@ def _check_extra_signals(ticker_data: dict) -> dict:
         signals["short_float_pct"] = short_pct
     else:
         signals["squeeze_potential"] = False
+
+    # 3. Insider Buying (Finnhub /stock/insider-transactions + MSPR)
+    insider_buys = ticker_data.get("insider_buys_30d", 0) or 0
+    insider_unique = ticker_data.get("insider_unique_buyers_30d", 0) or 0
+    insider_sells = ticker_data.get("insider_sells_30d", 0) or 0
+    insider_mspr = ticker_data.get("insider_mspr")
+    # EDGAR Form 4 cluster buy (post-scan enrichment, si disponible)
+    edgar_buys = ticker_data.get("edgar_insider_buys_30d", 0) or 0
+    edgar_cluster = ticker_data.get("edgar_insider_cluster_buy", False)
+
+    total_buys = max(insider_buys, edgar_buys)
+    total_unique = max(insider_unique, ticker_data.get("edgar_unique_buyers_30d", 0) or 0)
+    net_positive = total_buys > insider_sells
+
+    if (edgar_cluster or total_unique >= 3) and net_positive:
+        score += 4
+        source = "EDGAR Form 4 + Finnhub" if edgar_cluster else "Finnhub"
+        reasoning.append(f"✓✓ CLUSTER BUY insider: {total_unique} insiders compraron en 30d ({source})")
+        signals["insider_cluster_buy"] = True
+    elif total_buys >= 2 and net_positive:
+        score += 2
+        reasoning.append(f"✓ Insider buying: {total_buys} compras en 30d (Finnhub)")
+        signals["insider_cluster_buy"] = False
+    elif total_buys == 1 and net_positive:
+        score += 1
+        reasoning.append(f"~ Insider buy individual en 30d")
+        signals["insider_cluster_buy"] = False
+    else:
+        signals["insider_cluster_buy"] = False
+
+    if insider_mspr is not None:
+        signals["insider_mspr"] = round(insider_mspr, 3)
+        # MSPR > 0.5 refuerza la señal alcista de insiders
+        if insider_mspr > 0.5 and total_buys > 0:
+            reasoning.append(f"  MSPR={insider_mspr:.2f} (>0.5 confirma presión compradora de insiders)")
+
+    # 4. News Sentiment NLP (Finnhub /news-sentiment)
+    news_score = ticker_data.get("news_sentiment_score")
+    news_articles = ticker_data.get("news_articles_week", 0) or 0
+
+    if news_score is not None and news_articles >= 3:
+        if news_score > 0.3:
+            score += 1
+            reasoning.append(f"✓ Sentimiento NLP alcista: {news_score:+.2f} ({news_articles} artículos/semana)")
+        elif news_score < -0.3:
+            # Penalización: noticias negativas reducen la convicción
+            score -= 1
+            reasoning.append(f"✗ Sentimiento NLP bajista: {news_score:+.2f} — riesgo de presión vendedora")
+        signals["news_sentiment"] = round(news_score, 3)
 
     return {"score": score, "reasoning": reasoning, "signals": signals}

@@ -17,6 +17,12 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
+try:
+    from edgar import Company as EdgarCompany, set_identity as edgar_set_identity
+    _EDGAR_AVAILABLE = True
+except ImportError:
+    _EDGAR_AVAILABLE = False
+
 # Importar el comité virtual (longs y shorts)
 from committee import evaluate_opportunity, evaluate_short_opportunity
 
@@ -466,6 +472,18 @@ class MarketDataAPI:
             earnings_data = self.get_earnings_surprise(symbol)
             quote.update(earnings_data)
 
+        # Datos de insiders y sentimiento NLP (Finnhub free tier, endpoints anteriormente sin usar)
+        # Solo se llaman si el precio está en rango para evitar calls innecesarios en stocks filtrados
+        price = quote.get("price", 0)
+        if self.finnhub_key and price and price >= 1.0:
+            insider_data = self.get_insider_data_finnhub(symbol)
+            quote.update(insider_data)
+
+            news = self.get_news_sentiment(symbol)
+            quote["news_sentiment_score"] = news["score"]
+            quote["news_bullish_pct"] = news["bullish_pct"]
+            quote["news_articles_week"] = news["articles"]
+
         # Propagar datos del mercado para RS vs SPY (turtles Minervini)
         if market_status:
             quote["spy_price_60d_ago"] = market_status.get("spy_price_60d_ago", 0)
@@ -649,31 +667,91 @@ class MarketDataAPI:
 
         return earnings
 
+    def get_insider_data_finnhub(self, symbol: str) -> dict:
+        """
+        Obtiene transacciones de insiders y MSPR de Finnhub (free tier).
+
+        Endpoints usados:
+        - /stock/insider-transactions → compras/ventas con fecha y shares
+        - /stock/insider-sentiment    → MSPR (Monthly Share Purchase Ratio)
+
+        Retorna campos que alimentan _check_extra_signals() en catalyst.py.
+        """
+        result = {
+            "insider_buys_30d": 0,
+            "insider_sells_30d": 0,
+            "insider_net_shares_30d": 0,
+            "insider_mspr": None,
+            "insider_unique_buyers_30d": 0,
+        }
+
+        if not self.finnhub_key:
+            return result
+
+        cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+
+        try:
+            url = "https://finnhub.io/api/v1/stock/insider-transactions"
+            params = {"symbol": symbol, "token": self.finnhub_key}
+            response = requests.get(url, params=params, timeout=10, proxies={"http": None, "https": None})
+            if response.status_code == 200:
+                transactions = response.json().get("data", []) or []
+                recent = [t for t in transactions if (t.get("filingDate") or "") >= cutoff]
+                buys = [t for t in recent if (t.get("change") or 0) > 0]
+                sells = [t for t in recent if (t.get("change") or 0) < 0]
+                result["insider_buys_30d"] = len(buys)
+                result["insider_sells_30d"] = len(sells)
+                result["insider_net_shares_30d"] = int(sum(t.get("change", 0) or 0 for t in recent))
+                # Insiders únicos comprando (cluster signal: >= 3 diferentes insiders)
+                result["insider_unique_buyers_30d"] = len(set(t.get("name", "") for t in buys if t.get("name")))
+        except Exception as e:
+            print(f"[WARN] Finnhub insider-transactions failed for {symbol}: {e}")
+
+        try:
+            today = datetime.now()
+            url = "https://finnhub.io/api/v1/stock/insider-sentiment"
+            params = {
+                "symbol": symbol,
+                "from": (today - timedelta(days=90)).strftime("%Y-%m-%d"),
+                "to": today.strftime("%Y-%m-%d"),
+                "token": self.finnhub_key,
+            }
+            response = requests.get(url, params=params, timeout=10, proxies={"http": None, "https": None})
+            if response.status_code == 200:
+                entries = response.json().get("data", []) or []
+                if entries:
+                    result["insider_mspr"] = entries[-1].get("mspr")  # mes más reciente
+        except Exception as e:
+            print(f"[WARN] Finnhub insider-sentiment failed for {symbol}: {e}")
+
+        return result
+
     def get_news_sentiment(self, symbol: str) -> dict:
-        """Obtiene sentimiento de noticias recientes"""
-        sentiment = {"score": 0, "articles": 0, "positive": 0, "negative": 0}
+        """Obtiene sentimiento NLP de noticias via Finnhub /news-sentiment (bullish/bearish %)"""
+        sentiment = {"score": 0, "articles": 0, "bullish_pct": 0, "bearish_pct": 0}
 
-        if self.finnhub_key:
-            try:
-                today = datetime.now()
-                from_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
-                to_date = today.strftime("%Y-%m-%d")
+        if not self.finnhub_key:
+            return sentiment
 
-                url = "https://finnhub.io/api/v1/company-news"
-                params = {
-                    "symbol": symbol,
-                    "from": from_date,
-                    "to": to_date,
-                    "token": self.finnhub_key
-                }
+        try:
+            url = "https://finnhub.io/api/v1/news-sentiment"
+            params = {"symbol": symbol, "token": self.finnhub_key}
+            response = requests.get(url, params=params, timeout=10, proxies={"http": None, "https": None})
 
-                response = requests.get(url, params=params, timeout=10, proxies={'http': None, 'https': None})
-                if response.status_code == 200:
-                    articles = response.json()
-                    sentiment["articles"] = len(articles)
+            if response.status_code == 200:
+                data = response.json()
+                buzz = data.get("buzz", {}) or {}
+                sent = data.get("sentiment", {}) or {}
+                bullish = float(sent.get("bullishPercent") or 0)
+                bearish = float(sent.get("bearishPercent") or 0)
+                sentiment["articles"] = int(buzz.get("articlesInLastWeek") or 0)
+                sentiment["bullish_pct"] = round(bullish, 3)
+                sentiment["bearish_pct"] = round(bearish, 3)
+                # Net: +1.0 = totalmente alcista, -1.0 = totalmente bajista
+                sentiment["score"] = round(bullish - bearish, 3)
 
-            except Exception as e:
-                print(f"Error obteniendo noticias de {symbol}: {e}")
+        except Exception as e:
+            print(f"[WARN] Finnhub news-sentiment failed for {symbol}: {e}")
 
         return sentiment
 
@@ -947,6 +1025,102 @@ class MarketScanner:
 
         print(f"  Earnings encontrados: {len(self.earnings_calendar)} acciones con earnings proximos")
 
+    def _enrich_with_edgar(self, candidates: list) -> None:
+        """
+        Enriquece los top candidatos con datos de Form 4 (SEC EDGAR) via edgartools.
+        Se llama post-scan solo para el shortlist (max 15 símbolos) para limitar llamadas a SEC.
+
+        Actualiza in-place el campo edgar_* en el committee_evaluation de cada candidato.
+        Requiere: pip install edgartools (añadido en requirements.txt)
+        """
+        if not _EDGAR_AVAILABLE or not candidates:
+            return
+
+        # Identificar al bot ante SEC EDGAR (requerimiento legal de sec.gov)
+        user_agent = os.getenv("EDGAR_USER_AGENT", "investment-advisor-bot research@investment-advisor.local")
+        try:
+            edgar_set_identity(user_agent)
+        except Exception:
+            pass
+
+        print(f"\n  [EDGAR] Enriqueciendo {len(candidates)} candidatos con Form 4 (SEC)...")
+
+        def fetch_edgar_form4(symbol: str) -> dict:
+            result = {"edgar_insider_buys_30d": 0, "edgar_insider_sells_30d": 0,
+                      "edgar_insider_cluster_buy": False, "edgar_unique_buyers_30d": 0}
+            try:
+                company = EdgarCompany(symbol)
+                filings = company.get_filings(form="4").head(15)
+                cutoff = datetime.now() - timedelta(days=30)
+
+                buys, sells, buyer_names = 0, 0, set()
+                for filing in filings:
+                    fd = filing.filing_date
+                    # Normalizar a datetime
+                    if isinstance(fd, str):
+                        try:
+                            fd = datetime.strptime(fd[:10], "%Y-%m-%d")
+                        except Exception:
+                            continue
+                    elif not isinstance(fd, datetime):
+                        try:
+                            fd = datetime(fd.year, fd.month, fd.day)
+                        except Exception:
+                            continue
+
+                    if fd < cutoff:
+                        break  # Los filings están ordenados por fecha desc
+
+                    # Parsear el documento Form 4 para obtener el transaction_code
+                    try:
+                        form4 = filing.obj()
+                        for txn in (getattr(form4, "transactions", None) or []):
+                            code = getattr(txn, "transaction_code", "") or ""
+                            reporter = getattr(txn, "reporter_name", "") or getattr(form4, "reporting_owner_name", "") or ""
+                            if code == "P":  # Purchase
+                                buys += 1
+                                if reporter:
+                                    buyer_names.add(reporter)
+                            elif code in ("S", "D"):  # Sale / Disposition
+                                sells += 1
+                    except Exception:
+                        pass  # Silencioso: filing individual puede fallar
+
+                result["edgar_insider_buys_30d"] = buys
+                result["edgar_insider_sells_30d"] = sells
+                result["edgar_unique_buyers_30d"] = len(buyer_names)
+                # Cluster buy: >= 3 insiders distintos comprando en 30d
+                result["edgar_insider_cluster_buy"] = len(buyer_names) >= 3
+
+            except Exception as e:
+                print(f"  [EDGAR] {symbol}: {e}")
+
+            return result
+
+        # Procesar en paralelo con max 3 workers para respetar rate limit de SEC (10 req/s)
+        symbols = [c.get("symbol") for c in candidates if c.get("symbol")]
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(fetch_edgar_form4, sym): sym for sym in symbols}
+            for future in as_completed(futures):
+                sym = futures[future]
+                try:
+                    edgar_data = future.result(timeout=20)
+                    # Inyectar en el candidato correspondiente
+                    for candidate in candidates:
+                        if candidate.get("symbol") == sym:
+                            candidate["edgar_data"] = edgar_data
+                            # Propagar al stock_data usado por el comité (si hay committee_evaluation)
+                            eval_data = candidate.get("committee_evaluation", {})
+                            if eval_data:
+                                eval_data.setdefault("edgar_enrichment", edgar_data)
+                            # Log breve
+                            if edgar_data.get("edgar_insider_cluster_buy"):
+                                print(f"  [EDGAR] {sym}: CLUSTER BUY — {edgar_data['edgar_unique_buyers_30d']} insiders compraron (Form 4)")
+                            elif edgar_data.get("edgar_insider_buys_30d", 0) > 0:
+                                print(f"  [EDGAR] {sym}: {edgar_data['edgar_insider_buys_30d']} compras insider (Form 4)")
+                except Exception as e:
+                    print(f"  [EDGAR] {sym}: timeout/error — {e}")
+
     def scan_market(self, watchlist: list = None) -> dict:
         """Escanea el mercado en busca de oportunidades"""
 
@@ -1045,6 +1219,10 @@ class MarketScanner:
         watchlist_items.sort(key=lambda x: x["total_score"], reverse=True)
         short_opportunities.sort(key=lambda x: x["total_score"], reverse=True)
         short_watchlist.sort(key=lambda x: x["total_score"], reverse=True)
+
+        # Enriquecer top candidatos con SEC EDGAR Form 4 (post-scan, solo shortlist)
+        top_candidates = opportunities[:5] + watchlist_items[:10]
+        self._enrich_with_edgar(top_candidates)
 
         return {
             "timestamp": datetime.now().isoformat(),
@@ -1301,6 +1479,16 @@ def create_github_issue_body(scan_result: dict) -> tuple:
 """
                 if breakdown.get('sector_adjustment', 0) != 0:
                     body += f"| Ajuste sector | {breakdown.get('sector_adjustment', 0):+d} | — |\n"
+
+                # Datos EDGAR Form 4 si disponibles
+                edgar = opp.get("edgar_data", {})
+                if edgar:
+                    edgar_buys = edgar.get("edgar_insider_buys_30d", 0)
+                    edgar_unique = edgar.get("edgar_unique_buyers_30d", 0)
+                    cluster = edgar.get("edgar_insider_cluster_buy", False)
+                    if edgar_buys > 0:
+                        cluster_tag = " ⭐ CLUSTER BUY" if cluster else ""
+                        body += f"\n**SEC EDGAR Form 4 (últimos 30d):** {edgar_buys} compras insider, {edgar_unique} insiders únicos{cluster_tag}\n"
 
                 body += "\n**Razonamiento:**\n\n"
                 for component, reasons in reasoning.items():
